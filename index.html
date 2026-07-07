@@ -1,0 +1,2499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#14171A">
+<meta name="color-scheme" content="dark">
+<title>R-22 Superheat Charging</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#14171A;
+    --panel:#1D2124;
+    --panel-2:#242A2E;
+    --border:#333A3F;
+    --border-soft:#2A3034;
+    --text:#ECEFEF;
+    --text-dim:#9BA5AA;
+    --text-faint:#6B7378;
+    --low:#5B9BD9;
+    --low-dim:rgba(91,155,217,0.14);
+    --high:#D0574A;
+    --high-dim:rgba(208,87,74,0.14);
+    --amber:#E3A93E;
+    --amber-dim:rgba(227,169,62,0.14);
+    --green:#4CAE7E;
+    --green-dim:rgba(76,174,126,0.14);
+    --red:#D0574A;
+  }
+  *{box-sizing:border-box;}
+  html{background:#14171A;background:var(--bg);height:100%;}
+  html,body{margin:0;padding:0;color:var(--text);}
+  body{
+    background:#14171A;
+    background:var(--bg);
+    font-family:'Inter',sans-serif;
+    -webkit-font-smoothing:antialiased;
+    padding:calc(28px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right)) calc(60px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
+    min-height:100vh;
+    min-height:100dvh;
+    overscroll-behavior-y:none;
+  }
+  .wrap{max-width:880px;margin:0 auto;}
+
+  /* ---- Header ---- */
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--text-faint);margin-bottom:6px;
+  }
+  h1{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:700;font-size:28px;line-height:1.15;margin:0 0 4px;
+    letter-spacing:-.01em;
+  }
+  .subhead{color:var(--text-dim);font-size:14px;margin:0 0 18px;}
+
+  .safety{
+    display:flex;gap:10px;align-items:flex-start;
+    background:#241D0D;border:1px solid var(--amber);
+    border-radius:10px;padding:12px 14px;margin-bottom:22px;
+    font-size:12.5px;line-height:1.5;color:#E9C876;
+  }
+  .safety svg{flex:0 0 auto;margin-top:1px;}
+
+  /* ---- Panels ---- */
+  .panel{
+    background:var(--panel);border:1px solid var(--border);
+    border-radius:14px;padding:20px;margin-bottom:18px;
+  }
+  .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap;}
+  .panel-title{
+    font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:15px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .tag{
+    font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase;padding:3px 8px;border-radius:99px;
+    background:var(--panel-2);color:var(--text-dim);border:1px solid var(--border);
+  }
+  .tag.low{color:var(--low);border-color:rgba(91,155,217,.4);background:var(--low-dim);}
+  .tag.high{color:var(--high);border-color:rgba(208,87,74,.4);background:var(--high-dim);}
+
+  .field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;}
+  .field{display:flex;flex-direction:column;gap:5px;min-width:0;}
+  .field label{font-size:12px;color:var(--text-dim);display:flex;justify-content:space-between;}
+  .field label .opt{color:var(--text-faint);font-weight:400;}
+  .field input, .field textarea{
+    background:var(--panel-2);border:1px solid var(--border);color:var(--text);
+    border-radius:8px;padding:9px 10px;font-size:14.5px;
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .field input:focus, .field textarea:focus{outline:none;border-color:var(--text-dim);}
+  .field.required label::after{content:' *';color:var(--amber);}
+  .field-note{font-size:11px;color:var(--text-faint);font-family:'IBM Plex Mono',monospace;}
+  .field.low input{border-color:rgba(91,155,217,.35);}
+  .field.high input{border-color:rgba(208,87,74,.35);}
+
+  .btn{
+    appearance:none;-webkit-appearance:none;
+    font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14px;
+    border-radius:9px;padding:11px 18px;border:1px solid var(--border);
+    background:var(--panel-2);color:var(--text);cursor:pointer;
+    transition:filter .15s ease, transform .05s ease;
+  }
+  .btn:hover{filter:brightness(1.12);}
+  .btn:active{transform:scale(0.98);}
+  .btn.primary{background:var(--amber);border-color:var(--amber);color:#241A05;}
+  .btn.ghost{background:transparent;}
+  .btn.danger{color:var(--red);border-color:rgba(208,87,74,.4);background:transparent;}
+  .btn:disabled{opacity:.4;cursor:not-allowed;}
+  .btn-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;}
+
+  details.more{margin-top:14px;}
+  details.more summary{
+    cursor:pointer;font-size:12.5px;color:var(--text-dim);
+    font-family:'IBM Plex Mono',monospace;list-style:none;
+    display:flex;align-items:center;gap:6px;
+  }
+  details.more summary::-webkit-details-marker{display:none;}
+  details.more summary::before{content:'▸';display:inline-block;transition:transform .15s;}
+  details.more[open] summary::before{transform:rotate(90deg);}
+  details.more .field-grid{margin-top:12px;}
+
+  /* ---- Baseline summary strip ---- */
+  .strip{display:flex;flex-wrap:wrap;gap:20px 28px;}
+  .strip .item{min-width:90px;}
+  .strip .item .k{font-size:11px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.06em;font-family:'IBM Plex Mono',monospace;}
+  .strip .item .v{font-family:'IBM Plex Mono',monospace;font-size:17px;margin-top:3px;}
+
+  /* ---- Gauge ---- */
+  .gauge-row{display:flex;gap:24px;flex-wrap:wrap;align-items:center;}
+  .gauge-box{flex:0 0 auto;}
+  .gauge-readout{
+    position:absolute;left:50%;top:63%;transform:translate(-50%,-50%);
+    text-align:center;pointer-events:none;
+  }
+  .gauge-readout .val{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:30px;}
+  .gauge-readout .lbl{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-top:2px;}
+  .gauge-wrap{position:relative;width:220px;height:170px;}
+
+  .readout-grid{
+    flex:1 1 260px;
+    display:grid;grid-template-columns:1fr 1fr;gap:10px 18px;
+  }
+  .ro{padding:10px 0;border-bottom:1px solid var(--border-soft);}
+  .ro .k{font-size:11.5px;color:var(--text-dim);}
+  .ro .v{font-family:'IBM Plex Mono',monospace;font-size:16px;margin-top:2px;}
+  .ro .v.low{color:var(--low);}
+  .ro .v.high{color:var(--high);}
+
+  .reco{
+    margin-top:16px;border-radius:10px;padding:14px 16px;
+    display:flex;gap:12px;align-items:flex-start;
+  }
+  .reco.add{background:var(--amber-dim);border:1px solid rgba(227,169,62,.4);}
+  .reco.stop{background:var(--green-dim);border:1px solid rgba(76,174,126,.4);}
+  .reco.warn{background:var(--high-dim);border:1px solid rgba(208,87,74,.4);}
+  .reco.idle{background:var(--panel-2);border:1px solid var(--border);}
+  .reco .rt{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14.5px;}
+  .reco .rs{font-size:12.5px;color:var(--text-dim);margin-top:3px;line-height:1.5;}
+
+  .timer{
+    display:flex;align-items:center;gap:10px;margin-top:12px;
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .timer .clock{font-size:20px;min-width:64px;}
+  .timer .clock.done{color:var(--green);}
+
+  /* ---- Table ---- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{
+    text-align:left;font-family:'IBM Plex Mono',monospace;font-weight:500;
+    font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+    color:var(--text-faint);padding:8px 8px;border-bottom:1px solid var(--border);
+    white-space:nowrap;
+  }
+  td{padding:8px 8px;border-bottom:1px solid var(--border-soft);font-family:'IBM Plex Mono',monospace;white-space:nowrap;}
+  tr:last-child td{border-bottom:none;}
+  .table-scroll{overflow-x:auto;min-width:0;width:100%;}
+  .err-pos{color:var(--amber);}
+  .err-neg{color:var(--low);}
+  .err-ok{color:var(--green);}
+
+  .empty{color:var(--text-faint);font-size:13px;text-align:center;padding:26px 0;}
+  .archived-item{
+    padding:12px 0;border-bottom:1px solid var(--border-soft);
+    display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+  }
+  .archived-item:last-child{border-bottom:none;}
+  .archived-item .meta{font-size:12.5px;color:var(--text-dim);}
+  .archived-item .meta b{color:var(--text);}
+
+  .warn-line{font-size:12px;color:var(--high);margin-top:8px;font-family:'IBM Plex Mono',monospace;}
+  .status-line{font-size:12px;color:var(--text-faint);margin-top:10px;font-family:'IBM Plex Mono',monospace;}
+
+  .ambient-summary{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}
+  .ambient-summary .txt{font-size:12.5px;color:var(--text-dim);line-height:1.6;}
+  .ambient-summary .txt b{color:var(--text);font-weight:500;}
+  .ambient-hint{font-size:11.5px;color:var(--amber);margin-top:6px;font-family:'IBM Plex Mono',monospace;}
+  .ambient-form{margin-top:14px;padding-top:14px;border-top:1px solid var(--border-soft);}
+
+  .backup-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+  .backup-note{font-size:12px;color:var(--text-faint);margin-top:10px;line-height:1.5;}
+  input[type=file]{display:none;}
+
+  .chart-block{margin-bottom:22px;}
+  .chart-block:last-child{margin-bottom:0;}
+  .chart-title{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:13.5px;margin-bottom:2px;}
+  .chart-sub{font-size:11.5px;color:var(--text-faint);margin-bottom:10px;}
+  .chart-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;}
+  .legend-item{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-dim);}
+  .legend-swatch{width:14px;height:3px;border-radius:2px;display:inline-block;}
+  .legend-swatch.dashed{background:repeating-linear-gradient(to right, var(--text-dim) 0 4px, transparent 4px 7px);}
+  .chart-empty{font-size:12.5px;color:var(--text-faint);padding:20px 0;text-align:center;}
+  .chart-svg-text{font-family:'IBM Plex Mono',monospace;font-size:9px;fill:var(--text-faint);}
+
+  select{
+    background:var(--panel-2);border:1px solid var(--border);color:var(--text);
+    border-radius:8px;padding:9px 10px;font-size:14px;font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+  }
+  select:focus{outline:none;border-color:var(--text-dim);}
+  .site-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+  .site-info-strip{display:flex;flex-wrap:wrap;gap:16px 26px;margin-top:14px;}
+  .site-info-strip .item .k{font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.05em;font-family:'IBM Plex Mono',monospace;}
+  .site-info-strip .item .v{font-family:'IBM Plex Mono',monospace;font-size:14px;margin-top:2px;}
+  .type-toggle{display:flex;gap:8px;margin-bottom:14px;}
+  .type-toggle button{flex:1;}
+  .type-toggle button.active{background:var(--amber);border-color:var(--amber);color:#241A05;}
+
+  @media (max-width:520px){
+    .gauge-row{flex-direction:column;}
+    .readout-grid{grid-template-columns:1fr 1fr;width:100%;}
+  }
+
+  /* ---- Custom modal (replaces native confirm/alert — blocked in sandboxed iframes) ---- */
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(10,12,13,0.72);
+    display:flex; align-items:center; justify-content:center; z-index:1000;
+    padding:20px;
+  }
+  .modal-box{
+    background:var(--panel-2); border:1px solid var(--border); border-radius:12px;
+    max-width:420px; width:100%; padding:20px; box-shadow:0 12px 40px rgba(0,0,0,0.4);
+  }
+  .modal-msg{font-size:14px; color:var(--text); line-height:1.5; margin-bottom:18px; white-space:pre-line;}
+  .modal-btns{display:flex; gap:10px; justify-content:flex-end;}
+
+  /* ---- Storage-unavailable banner ---- */
+  .storage-banner{
+    display:flex; align-items:center; gap:10px; justify-content:space-between;
+    background:#241D0D; border:1px solid var(--amber); border-radius:10px;
+    padding:10px 14px; margin-bottom:14px; font-size:12.5px; color:var(--text);
+  }
+  .storage-banner button{
+    background:none; border:none; color:var(--text-dim); font-size:18px; line-height:1;
+    cursor:pointer; padding:0 2px; flex-shrink:0;
+  }
+
+  /* ---- Wet-bulb calc helper ---- */
+  .wb-helper{margin-top:2px;}
+  .wb-note{font-size:11px; color:var(--text-faint); margin-top:4px; font-family:'IBM Plex Mono',monospace;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="panel">
+    <div class="eyebrow">Fixed-orifice · R-22</div>
+    <h1>Superheat Charging Assistant</h1>
+    <p class="subhead" style="margin-bottom:0;">Log each stabilized reading, get the next-step forecast — done.</p>
+  </div>
+
+  <div class="safety">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#E9C876" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 0 0 3.82 21h16.36a2 2 0 0 0 1.71-2.96L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+    <div>Charge R-22 vapor into the low side of a <b>running</b> compressor. Keep the cylinder upright — never invert it while feeding the suction side.</div>
+  </div>
+
+  <div id="storageBanner" class="storage-banner" style="display:none;">
+    <span>Auto-save isn't available in this environment — your data won't persist automatically. Use Export/Backup below before closing this tab.</span>
+    <button id="storageBannerDismiss" aria-label="Dismiss">&times;</button>
+  </div>
+
+  <div id="modalOverlay" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+      <div id="modalMsg" class="modal-msg"></div>
+      <div class="modal-btns">
+        <button id="modalCancelBtn" class="btn ghost">Cancel</button>
+        <button id="modalOkBtn" class="btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fallback for when Share/Download silently do nothing (common in
+       sandboxed webviews) — lets the data be copied out manually. -->
+  <div id="jsonModalOverlay" class="modal-overlay" style="display:none;">
+    <div class="modal-box" style="max-width:520px;">
+      <div class="modal-msg">If nothing downloaded or a share sheet didn't appear, your data is below — copy it and paste into Notes, the Files app (New Text File), or an email to save it as a backup.</div>
+      <textarea id="jsonModalText" readonly style="width:100%;height:200px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;box-sizing:border-box;"></textarea>
+      <div class="modal-btns" style="margin-top:14px;">
+        <button id="jsonModalCloseBtn" class="btn ghost">Close</button>
+        <button id="jsonModalCopyBtn" class="btn primary">Copy to clipboard</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SITE PANEL -->
+  <div id="sitePanel" class="panel"></div>
+
+  <!-- BASELINE PANEL -->
+  <div id="baselinePanel" class="panel"></div>
+
+  <!-- AMBIENT RECHECK PANEL -->
+  <div id="ambientPanel" class="panel" style="display:none;"></div>
+
+  <!-- STEP ENTRY PANEL -->
+  <div id="stepPanel" class="panel" style="display:none;"></div>
+
+  <!-- RESULTS PANEL -->
+  <div id="resultsPanel" class="panel" style="display:none;"></div>
+
+  <!-- CHARTS PANEL -->
+  <div id="chartsPanel" class="panel" style="display:none;"></div>
+
+  <!-- HISTORY PANEL -->
+  <div id="historyPanel" class="panel" style="display:none;"></div>
+
+  <!-- ARCHIVE PANEL -->
+  <div id="archivePanel" class="panel"></div>
+
+  <!-- SITE TREND PANEL -->
+  <div id="siteTrendPanel" class="panel" style="display:none;"></div>
+
+  <!-- BACKUP/RESTORE PANEL (whole dataset, all sites) -->
+  <div class="panel">
+    <div class="panel-head">
+      <div class="panel-title">Backup</div>
+      <span class="tag">All sites · local file</span>
+    </div>
+    <div class="backup-row">
+      <button class="btn ghost" id="backupBtn">Backup (.json)</button>
+      <button class="btn ghost" id="restoreTriggerBtn">Restore</button>
+      <input type="file" id="restoreFile" accept="application/json">
+    </div>
+    <div class="backup-note">Saves every site and its full history in one file — the full safety net, independent of whether the artifact's storage persists on your device. Restoring replaces every site currently stored here. For a single site, use Export/Import in the Site section above instead.</div>
+  </div>
+
+</div>
+
+<script>
+/* =========================================================
+   R-22 Pressure/Temperature table (iGas R22 PT chart)
+   ========================================================= */
+const R22_PT = [
+  [0,24],[5,28.3],[10,33.8],[15,38.8],[20,43.1],[25,48.8],[30,54.9],[35,61.4],
+  [40,68.5],[45,76],[50,84.1],[55,92.6],[60,101.6],[65,111.3],[70,121.4],
+  [75,132.2],[80,143.6],[85,155.7],[90,168.4],[95,181.8],[100,195.9],
+  [105,210.8],[110,226.4],[115,242.8],[120,260],[125,278],[130,296.9],
+  [135,316.7],[140,337.4],[145,359],[150,381.7]
+];
+
+function satTempFromPsig(psig){
+  if(psig===null||psig===undefined||psig==='') return null;
+  psig = Number(psig);
+  if(isNaN(psig)) return null;
+  const pts = R22_PT;
+  if(psig <= pts[0][1]) return pts[0][0];
+  if(psig >= pts[pts.length-1][1]) return pts[pts.length-1][0];
+  for(let i=0;i<pts.length-1;i++){
+    const [t0,p0] = pts[i], [t1,p1] = pts[i+1];
+    if(psig>=p0 && psig<=p1){
+      return t0 + (psig-p0)*(t1-t0)/(p1-p0);
+    }
+  }
+  return null;
+}
+
+function psigFromSatTemp(tempF){
+  if(tempF===null||tempF===undefined||isNaN(tempF)) return null;
+  const pts = R22_PT;
+  if(tempF <= pts[0][0]) return pts[0][1];
+  if(tempF >= pts[pts.length-1][0]) return pts[pts.length-1][1];
+  for(let i=0;i<pts.length-1;i++){
+    const [t0,p0] = pts[i], [t1,p1] = pts[i+1];
+    if(tempF>=t0 && tempF<=t1){
+      return p0 + (tempF-t0)*(p1-p0)/(t1-t0);
+    }
+  }
+  return null;
+}
+
+/* =========================================================
+   Storage helpers — multi-site model
+   Each site: {id, name, refrigerant, meteringType, nameplateOz, tons,
+               createdAt, active: Session|null, archive: Session[]}
+   ========================================================= */
+const SITES_KEY = 'r22:sites';
+const CURRENT_SITE_KEY = 'r22:currentSiteId';
+const OLD_ACTIVE_KEY = 'r22:active';
+const OLD_ARCHIVE_KEY = 'r22:archive';
+
+let sites = [];
+let currentSiteId = null;
+let active = null;      // convenience reference to currentSite().active
+let archive = [];       // convenience reference to currentSite().archive
+let baselinePrefill = null; // {outdoorDB, indoorWB} carried in when starting a recharge from a checkup's "Start a recharge session" suggestion
+let timerInterval = null;
+let timerEndsAt = null;
+
+let storageAvailable = true;
+
+/* =========================================================
+   Custom modal — native confirm()/alert() are silently
+   ignored inside sandboxed iframes (e.g. Claude artifacts
+   without allow-modals), so we roll our own.
+   ========================================================= */
+function showConfirmModal(message){
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('modalOverlay');
+    const msgEl = document.getElementById('modalMsg');
+    const okBtn = document.getElementById('modalOkBtn');
+    const cancelBtn = document.getElementById('modalCancelBtn');
+    msgEl.textContent = message;
+    cancelBtn.style.display = '';
+    okBtn.textContent = 'OK';
+    overlay.style.display = 'flex';
+    const cleanup = (result) => {
+      overlay.style.display = 'none';
+      okBtn.onclick = null; cancelBtn.onclick = null;
+      resolve(result);
+    };
+    okBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+  });
+}
+function showAlertModal(message){
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('modalOverlay');
+    const msgEl = document.getElementById('modalMsg');
+    const okBtn = document.getElementById('modalOkBtn');
+    const cancelBtn = document.getElementById('modalCancelBtn');
+    msgEl.textContent = message;
+    cancelBtn.style.display = 'none';
+    okBtn.textContent = 'OK';
+    overlay.style.display = 'flex';
+    const cleanup = () => {
+      overlay.style.display = 'none';
+      cancelBtn.style.display = '';
+      okBtn.onclick = null;
+      resolve();
+    };
+    okBtn.onclick = cleanup;
+  });
+}
+
+/* =========================================================
+   Storage backend — prefers Anthropic's artifact storage API
+   (window.storage) when available, since it works from inside
+   Claude regardless of browser. Falls back to the browser's own
+   localStorage when that's absent — which is what lets a
+   standalone copy of this file, opened directly in a real
+   browser outside Claude, still remember data between visits
+   instead of resetting every time. Both are wrapped behind the
+   same async get/set/delete interface so the rest of the app
+   doesn't need to know which one is in use.
+   ========================================================= */
+let appStorage = null;
+
+function makeLocalStorageBackend(){
+  return {
+    async get(key){
+      const raw = localStorage.getItem(key);
+      return raw===null ? null : {key, value: raw};
+    },
+    async set(key, value){
+      localStorage.setItem(key, value);
+      return {key, value};
+    },
+    async delete(key){
+      localStorage.removeItem(key);
+      return {key, deleted:true};
+    }
+  };
+}
+
+async function probeStorage(){
+  const probeKey = 'r22:__probe__';
+
+  if(window.storage && typeof window.storage.set==='function' && typeof window.storage.get==='function'){
+    try{
+      await window.storage.set(probeKey, '1');
+      const r = await window.storage.get(probeKey);
+      if(r && r.value === '1'){
+        appStorage = window.storage;
+        storageAvailable = true;
+        try{ await window.storage.delete(probeKey); }catch(e){}
+        return;
+      }
+    }catch(e){
+      // fall through to try localStorage below
+    }
+  }
+
+  try{
+    if(typeof localStorage !== 'undefined'){
+      localStorage.setItem(probeKey, '1');
+      const ok = localStorage.getItem(probeKey) === '1';
+      localStorage.removeItem(probeKey);
+      if(ok){
+        appStorage = makeLocalStorageBackend();
+        storageAvailable = true;
+        return;
+      }
+    }
+  }catch(e){
+    // ignore — falls through to the unavailable state below
+  }
+
+  storageAvailable = false;
+  const banner = document.getElementById('storageBanner');
+  if(banner) banner.style.display = 'flex';
+}
+
+function currentSite(){ return sites.find(s => s.id === currentSiteId) || null; }
+
+function newSiteId(){ return 'site_' + Date.now() + '_' + Math.random().toString(36).slice(2,7); }
+
+function syncActiveArchiveFromSite(){
+  const site = currentSite();
+  active = site ? site.active : null;
+  archive = site ? site.archive : [];
+}
+
+async function loadState(){
+  let loaded = null;
+  let migrated = false;
+  if(!storageAvailable){ syncActiveArchiveFromSite(); return; }
+  try{
+    const s = await appStorage.get(SITES_KEY);
+    loaded = s ? JSON.parse(s.value) : null;
+  }catch(e){ loaded = null; }
+
+  if(loaded && loaded.sites){
+    sites = loaded.sites;
+  } else {
+    sites = [];
+    // migrate legacy single-session schema, if present
+    let legacyActive = null, legacyArchive = [];
+    try{ const a = await appStorage.get(OLD_ACTIVE_KEY); legacyActive = a ? JSON.parse(a.value) : null; }catch(e){}
+    try{ const a = await appStorage.get(OLD_ARCHIVE_KEY); legacyArchive = a ? JSON.parse(a.value) : []; }catch(e){}
+    if(legacyActive || (legacyArchive && legacyArchive.length)){
+      sites.push({
+        id: newSiteId(), name: 'My System', refrigerant:'R-22', meteringType:'Fixed-orifice',
+        nameplateOz:'', tons:'', createdAt: Date.now(),
+        active: legacyActive, archive: legacyArchive || []
+      });
+      try{ await appStorage.delete(OLD_ACTIVE_KEY); }catch(e){}
+      try{ await appStorage.delete(OLD_ARCHIVE_KEY); }catch(e){}
+      migrated = true;
+    }
+  }
+
+  try{
+    const c = await appStorage.get(CURRENT_SITE_KEY);
+    currentSiteId = c ? c.value : null;
+  }catch(e){ currentSiteId = null; }
+  if(!currentSiteId || !sites.find(s=>s.id===currentSiteId)){
+    currentSiteId = sites.length ? sites[0].id : null;
+  }
+  if(migrated){
+    await saveSites(); // persist the migrated structure immediately, don't wait for the next user action
+  }
+  syncActiveArchiveFromSite();
+}
+
+async function saveSites(){
+  if(!storageAvailable) return;
+  try{ await appStorage.set(SITES_KEY, JSON.stringify({sites})); }
+  catch(e){ console.error('save sites failed', e); }
+  try{ if(currentSiteId) await appStorage.set(CURRENT_SITE_KEY, currentSiteId); }
+  catch(e){ console.error('save current site failed', e); }
+}
+async function saveActive(){
+  const site = currentSite();
+  if(site) site.active = active;
+  await saveSites();
+}
+async function saveArchive(){
+  const site = currentSite();
+  if(site) site.archive = archive;
+  await saveSites();
+}
+
+/* =========================================================
+   Formatting helpers
+   ========================================================= */
+const fmt1 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*10)/10).toFixed(1);
+const numOrEmpty = v => (v===null||v===undefined||isNaN(v)) ? '' : (Math.round(v*10)/10).toString();
+const fmt2 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+const fmt3 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*1000)/1000).toFixed(3);
+const lbOz = oz => (oz===null||oz===undefined||isNaN(oz)) ? '—' : `${fmt2(oz/16)} lb (${fmt1(oz)} oz)`;
+const lbOnly = oz => (oz===null||oz===undefined||isNaN(oz)) ? '—' : `${fmt2(oz/16)} lb`;
+function lbToLbOz(lb){
+  if(lb===null||lb===undefined||isNaN(lb)) return '—';
+  const totalOz = lb*16;
+  const wholeLb = Math.floor(totalOz/16);
+  const oz = totalOz - wholeLb*16;
+  return `${wholeLb} lb ${oz.toFixed(1)} oz`;
+}
+
+/* =========================================================
+   Historical rate vs ODDB (per-site memory)
+   ========================================================= */
+function collectHistoricalRatePoints(site){
+  if(!site) return [];
+  const points = [];
+  (site.archive || []).forEach(session => {
+    if(session.type === 'checkup') return;
+    const rows = resolveFields(session.baseline, session.steps);
+    rows.forEach(r => {
+      if(r.shDropPerOz!==null && !isNaN(r.shDropPerOz) && !isNaN(r.outdoorDB)){
+        points.push({x: r.outdoorDB, y: r.shDropPerOz});
+      }
+    });
+  });
+  return points;
+}
+
+function makeRatePredictor(points){
+  if(!points || points.length===0) return null;
+  if(points.length===1){
+    const p = points[0];
+    return (oddb) => ({rate: p.y, confidence:'single', extrapolated: isNaN(oddb) || Math.abs(oddb-p.x)>15, basedOn:1});
+  }
+  const n = points.length;
+  const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
+  const xMean = xs.reduce((a,b)=>a+b,0)/n, yMean = ys.reduce((a,b)=>a+b,0)/n;
+  let num=0, den=0;
+  for(let i=0;i<n;i++){ num += (xs[i]-xMean)*(ys[i]-yMean); den += (xs[i]-xMean)**2; }
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  if(den===0){
+    return (oddb) => ({rate: yMean, confidence:'flat', extrapolated: isNaN(oddb) || oddb<xMin || oddb>xMax, basedOn:n});
+  }
+  const slope = num/den, intercept = yMean - slope*xMean;
+  return (oddb) => {
+    if(isNaN(oddb)) return {rate: yMean, confidence:'fit', extrapolated:true, basedOn:n};
+    const predicted = intercept + slope*oddb;
+    return {rate: predicted, confidence:'fit', extrapolated: oddb<xMin || oddb>xMax, basedOn:n};
+  };
+}
+
+function buildPredictRateForSite(site){
+  const points = collectHistoricalRatePoints(site);
+  return makeRatePredictor(points);
+}
+
+/* =========================================================
+   Core calc: build a derived record for each step, given
+   baseline + steps array. Each raw step only stores fields
+   actually entered; we resolve "reused" values here.
+   opts.predictRate: optional fn(oddb) -> {rate,confidence,extrapolated,basedOn}
+   used as a fallback when no in-session measured rate exists yet.
+   ========================================================= */
+// Total refrigerant added for a whole recharge session, from start/end jug
+// weight only (current workflow — mid-charge weighing isn't practical with
+// a hose attached, so this is the one real measurement we have).
+function sessionMeasuredTotalOz(session){
+  if(!session || session.type==='checkup') return null;
+  const start = Number(session.baseline && session.baseline.jugWeight);
+  const end = Number(session.finalWeight);
+  if(isNaN(start) || isNaN(end)) return null;
+  return Math.max(0, (start-end)*16);
+}
+
+function resolveFields(baseline, steps, opts={}){
+  // returns array of resolved rows aligned with steps (index 0 = baseline)
+  const rows = [];
+  let prevOutdoorDB = baseline.outdoorDB,
+      prevIndoorWB = baseline.indoorWB, prevLiquid = baseline.liquidTemp;
+
+  const all = [{...baseline, isBaseline:true}, ...steps];
+  let prevWeight = null, prevActualSH = null, prevTotalOz = 0;
+
+  // Auto-detect the per-step weight mode from the FIRST reading on the
+  // jug(+hoses) basis — that's baseline.chargeWeight if it was given
+  // (an optional weigh-in taken with hoses attached, right at baseline,
+  // separate from the required jug-only Starting weight), otherwise the
+  // first step that has a weight. If that first reading is exactly 0,
+  // treat it as a mid-charge scale that was Tared at that point: every
+  // reading from then on is a running total added since the tare, not an
+  // absolute jug(+hoses) weight that needs differencing. Since we only
+  // ever charge the system (never pull refrigerant back out), we take
+  // the magnitude — a scale under a losing-weight jug will report that
+  // running total as a negative number as the charge is delivered.
+  let incrementalWeighMode = false;
+  const firstChainReading = (baseline.chargeWeight!==undefined && baseline.chargeWeight!=='')
+    ? baseline.chargeWeight
+    : (steps.find(s => s.jugWeight!==undefined && s.jugWeight!=='') || {}).jugWeight;
+  if(firstChainReading!==undefined && firstChainReading!==''){
+    incrementalWeighMode = Number(firstChainReading) === 0;
+  }
+  let lastCumulativeOz = null;
+
+  all.forEach((s, idx) => {
+    const outdoorDB = (s.outdoorDB!==undefined && s.outdoorDB!=='') ? Number(s.outdoorDB) : prevOutdoorDB;
+    const indoorWB  = (s.indoorWB!==undefined && s.indoorWB!=='')  ? Number(s.indoorWB)  : prevIndoorWB;
+    const liquidTemp = (s.liquidTemp!==undefined && s.liquidTemp!=='') ? Number(s.liquidTemp) : prevLiquid;
+    prevOutdoorDB = outdoorDB; prevIndoorWB = indoorWB; prevLiquid = liquidTemp;
+
+    // Baseline's own "weight" on this jug(+hoses) chain is the optional
+    // chargeWeight reading, if one was taken — never the required
+    // jug-only Starting weight, which isn't on the same basis.
+    const weight = idx===0
+      ? (baseline.chargeWeight!==undefined && baseline.chargeWeight!=='' ? Number(baseline.chargeWeight) : NaN)
+      : Number(s.jugWeight);
+    const lowPsig = Number(s.lowPsig);
+    const highPsig = Number(s.highPsig);
+    const suctionTemp = Number(s.suctionTemp); // SLT
+
+    const vsat = satTempFromPsig(lowPsig);   // Vapor Saturation Temp (low side)
+    const lsat = satTempFromPsig(highPsig);  // Liquid Saturation Temp (high side / condensing temp)
+    const actualSH = (vsat!==null && !isNaN(suctionTemp)) ? suctionTemp - vsat : null; // SH
+    const targetSH = (indoorWB!==undefined && outdoorDB!==undefined && !isNaN(indoorWB) && !isNaN(outdoorDB))
+      ? (3*indoorWB - 80 - outdoorDB)/2 : null; // TSH
+    const shError = (actualSH!==null && targetSH!==null) ? actualSH - targetSH : null;
+    const condensingSplit = (lsat!==null && !isNaN(outdoorDB)) ? lsat - outdoorDB : null;
+    const subcooling = (lsat!==null && !isNaN(liquidTemp)) ? lsat - liquidTemp : null; // SC
+
+    const targetVSAT = (targetSH!==null && !isNaN(suctionTemp)) ? suctionTemp - targetSH : null;
+    const targetLowPsig = targetVSAT!==null ? psigFromSatTemp(targetVSAT) : null;
+
+    let stepOz = null, totalOz;
+    if(idx===0){
+      totalOz = 0;
+      // If a baseline chargeWeight was given, it seeds the chain: under
+      // tare/incremental mode it establishes the cumulative-oz reference
+      // point; under absolute mode, prevWeight picks it up naturally
+      // below, letting step 1 diff against a real prior reading.
+      if(incrementalWeighMode && !isNaN(weight)){
+        lastCumulativeOz = Math.abs(weight)*16;
+      }
+    } else if(incrementalWeighMode){
+      if(!isNaN(weight)){
+        const cumulativeOz = Math.abs(weight)*16;
+        stepOz = lastCumulativeOz!==null ? Math.max(0, cumulativeOz-lastCumulativeOz) : 0;
+        totalOz = cumulativeOz;
+        lastCumulativeOz = cumulativeOz;
+      } else {
+        totalOz = null;
+      }
+    } else if(!isNaN(weight)){
+      if(prevWeight!==null){
+        stepOz = Math.max(0, (prevWeight - weight)*16);
+        totalOz = prevTotalOz!==null ? prevTotalOz + stepOz : stepOz;
+      } else {
+        // First reading on this chain — nothing comparable to diff
+        // against yet, so it just establishes the reference point the
+        // chain resumes counting from.
+        totalOz = 0;
+      }
+    } else {
+      totalOz = null;
+    }
+
+    let deltaSH = null, shDropPerOz = null;
+    if(idx>0 && prevActualSH!==null && actualSH!==null && stepOz>0){
+      deltaSH = prevActualSH - actualSH;
+      shDropPerOz = deltaSH/stepOz;
+    }
+
+    // effective rate used for the estimate: prefer this session's own
+    // measured rate; fall back to the site's historical ODDB-based fit.
+    let estRate = shDropPerOz, estRateSource = shDropPerOz!==null ? 'measured' : null, estRatePrediction = null;
+    if(estRate===null && opts.predictRate){
+      estRatePrediction = opts.predictRate(outdoorDB);
+      if(estRatePrediction){ estRate = estRatePrediction.rate; estRateSource = 'historical'; }
+    }
+    const ozPerDegree = (estRate!==null && estRate>0) ? 1/estRate : null;
+    const lbPerDegree = ozPerDegree!==null ? ozPerDegree/16 : null;
+
+    let estTotalOz = null, estRemainingOz = null;
+    if(estRate!==null && estRate>0 && shError!==null){
+      estTotalOz = totalOz + shError/estRate;
+      estRemainingOz = Math.max(0, estTotalOz - totalOz);
+    }
+
+    const ambientProvided = idx===0 || ['outdoorDB','indoorWB','liquidTemp'].some(k => s[k]!==undefined && s[k]!=='');
+
+    rows.push({
+      idx, isBaseline: idx===0, ambientOnly: !!s.ambientOnly, ambientProvided,
+      timestamp: s.timestamp || null,
+      // Baseline's weight is only shown here if an optional jug+hoses
+      // chargeWeight reading was taken — never the required jug-only
+      // Starting weight, which is a different measurement basis.
+      weight, outdoorDB, indoorWB, liquidTemp,
+      lowPsig, highPsig, suctionTemp,
+      vsat, lsat, actualSH, targetSH, shError, condensingSplit, subcooling,
+      targetVSAT, targetLowPsig,
+      stepOz, totalOz, shDropPerOz, ozPerDegree, lbPerDegree,
+      estRate, estRateSource, estRatePrediction, estTotalOz, estRemainingOz,
+      notes: s.notes || ''
+    });
+
+    // Baseline only seeds the chain if it has a real chargeWeight reading
+    // (weight is NaN there otherwise), so this naturally excludes the
+    // jug-only Starting weight from ever being diffed against.
+    prevWeight = isNaN(weight) ? prevWeight : weight;
+    prevActualSH = actualSH!==null ? actualSH : prevActualSH;
+    prevTotalOz = totalOz;
+  });
+
+  return rows;
+}
+
+function recommendation(row, sessionType){
+  if(row.shError===null) return {level:'idle', title:'Enter both IDWB and ODDB', sub:'Target superheat (TSH) needs both readings to compute.'};
+  const err = row.shError;
+  const haveRate = row.estRate!==null && row.estRate>0;
+  const sourceNote = row.estRateSource==='historical'
+    ? ` (estimated from this site's history${row.estRatePrediction && row.estRatePrediction.extrapolated ? ' — outside conditions seen before, lower confidence' : ''})`
+    : '';
+
+  if(sessionType === 'checkup'){
+    if(err>5){
+      const ozNeeded = haveRate?Math.max(1,Math.round(row.estRemainingOz)):null;
+      return {level:'add', oz: ozNeeded,
+        title: haveRate ? `Estimated deficit: ~${lbOz(ozNeeded)}` : 'Running low on charge',
+        sub: `SH is ${fmt1(err)}°F above target${sourceNote}. Worth scheduling a recharge.`};
+    }
+    if(err>=-3){
+      return {level:'stop', oz:0, title:'Within normal range', sub:'SH is close to target — no action needed right now.'};
+    }
+    return {level:'warn', oz:0, title:'Running rich', sub:'SH is below target — check airflow/load rather than assuming overcharge from a single checkup reading.'};
+  }
+
+  let oz;
+  if(err>10){
+    oz = haveRate ? Math.min(4, Math.max(1, Math.round(row.estRemainingOz))) : 4;
+    return {level:'add', oz, title:`Add ~${lbOz(oz)} vapor, stabilize 5–10 min, remeasure`, sub:`SH is ${fmt1(err)}°F above target — running low side.${sourceNote}`};
+  }
+  if(err>5){
+    oz = haveRate ? Math.min(2, Math.max(1, Math.round(row.estRemainingOz))) : 2;
+    return {level:'add', oz, title:`Add ~${lbOz(oz)} vapor, stabilize 5–10 min, remeasure`, sub:`SH is ${fmt1(err)}°F above target.${sourceNote}`};
+  }
+  if(err>=-3){
+    return {level:'stop', oz:0, title:'Near target — stop and verify', sub:'Let the system stabilize fully, then recheck before closing up.'};
+  }
+  return {level:'warn', oz:0, title:'Do not add refrigerant', sub:'SH is below target — possible overcharge or low indoor load. Recheck airflow and load before removing charge.'};
+}
+
+/* =========================================================
+   Generic gauge SVG builder (used for SH error and
+   condensing-split dials)
+   ========================================================= */
+function polar(cx,cy,r,angle){
+  const a = (angle)*Math.PI/180;
+  return {x: cx + r*Math.sin(a), y: cy - r*Math.cos(a)};
+}
+function arcPath(cx,cy,r,a0,a1){
+  const p0 = polar(cx,cy,r,a0), p1 = polar(cx,cy,r,a1);
+  const large = (a1-a0) > 180 ? 1 : 0;
+  return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+}
+const A0=-135, A1=135;
+
+function buildGauge(value, opts){
+  const {min, max, zones, tickStep, labelStep} = opts;
+  const cx=110, cy=118, r=88;
+  const valToAngle = v => {
+    const c = Math.max(min, Math.min(max, v));
+    return A0 + (c-min)/(max-min)*(A1-A0);
+  };
+  let zoneArcs = zones.map(([v0,v1,col]) =>
+    `<path d="${arcPath(cx,cy,r,valToAngle(v0),valToAngle(v1))}" stroke="${col}" stroke-width="10" fill="none" stroke-linecap="butt" opacity="0.85"/>`
+  ).join('');
+  let ticks = '';
+  for(let v=min; v<=max; v+=tickStep){
+    const a = valToAngle(v);
+    const p0 = polar(cx,cy,r+9,a), p1 = polar(cx,cy,r+16,a);
+    ticks += `<line x1="${p0.x.toFixed(1)}" y1="${p0.y.toFixed(1)}" x2="${p1.x.toFixed(1)}" y2="${p1.y.toFixed(1)}" stroke="var(--text-faint)" stroke-width="1.5"/>`;
+    if(v % labelStep === 0){
+      const lp = polar(cx,cy,r+27,a);
+      ticks += `<text x="${lp.x.toFixed(1)}" y="${(lp.y+3).toFixed(1)}" text-anchor="middle" font-size="9" fill="var(--text-faint)" font-family="IBM Plex Mono, monospace">${v>0&&min<0?'+':''}${v}</text>`;
+    }
+  }
+  let needleHtml = '';
+  if(value!==null && !isNaN(value)){
+    const needleAngle = valToAngle(value);
+    const tip = polar(cx,cy,r-16,needleAngle);
+    needleHtml = `<line x1="${cx}" y1="${cy}" x2="${tip.x.toFixed(2)}" y2="${tip.y.toFixed(2)}" stroke="var(--text)" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="${cx}" cy="${cy}" r="5" fill="var(--text)"/>`;
+  }
+  return `<svg viewBox="0 0 220 145" width="220" height="145">
+    <path d="${arcPath(cx,cy,r,A0,A1)}" stroke="var(--border)" stroke-width="10" fill="none"/>
+    ${zoneArcs}
+    ${ticks}
+    ${needleHtml}
+  </svg>`;
+}
+
+function buildSHGauge(shError){
+  return buildGauge(shError, {
+    min:-20, max:20, tickStep:5, labelStep:10,
+    zones: [
+      [-20,-10,'var(--red)'],
+      [-10,-3,'var(--amber)'],
+      [-3,3,'var(--green)'],
+      [3,10,'var(--amber)'],
+      [10,20,'var(--red)'],
+    ]
+  });
+}
+
+function buildSplitGauge(split){
+  return buildGauge(split, {
+    min:0, max:60, tickStep:10, labelStep:20,
+    zones: [
+      [0,15,'var(--red)'],
+      [15,20,'var(--amber)'],
+      [20,35,'var(--green)'],
+      [35,45,'var(--amber)'],
+      [45,60,'var(--red)'],
+    ]
+  });
+}
+
+/* =========================================================
+   Generic line chart (used for the SH deviation trend and
+   the actual-vs-target SH trend)
+   ========================================================= */
+function buildLineChart(seriesList, opts={}){
+  const W = 620, H = 190;
+  const M = {t:14, r:16, b:26, l:38};
+  const plotW = W - M.l - M.r, plotH = H - M.t - M.b;
+
+  const allPoints = seriesList.flatMap(s => s.points);
+  if(allPoints.length === 0) return null;
+
+  let xMin = Math.min(...allPoints.map(p=>p.x));
+  let xMax = Math.max(...allPoints.map(p=>p.x));
+  if(xMin === xMax){ xMax = xMin + 1; }
+
+  let yVals = allPoints.map(p=>p.y);
+  if(opts.zeroLine) yVals = yVals.concat([0]);
+  if(opts.yZones) yVals = yVals.concat(opts.yZones.flatMap(z=>[z[0],z[1]]).filter(v=>isFinite(v)));
+  let yMin = Math.min(...yVals), yMax = Math.max(...yVals);
+  if(yMin === yMax){ yMin -= 1; yMax += 1; }
+  const pad = (yMax-yMin)*0.15;
+  yMin -= pad; yMax += pad;
+
+  const sx = x => M.l + (x-xMin)/(xMax-xMin)*plotW;
+  const sy = y => M.t + plotH - (y-yMin)/(yMax-yMin)*plotH;
+
+  let zonesHtml = '';
+  if(opts.yZones){
+    zonesHtml = opts.yZones.map(([v0,v1,col]) => {
+      const yTop = sy(Math.min(v1,yMax));
+      const yBot = sy(Math.max(v0,yMin));
+      if(yBot<=yTop) return '';
+      return `<rect x="${M.l}" y="${yTop.toFixed(1)}" width="${plotW}" height="${(yBot-yTop).toFixed(1)}" fill="${col}" opacity="0.12"/>`;
+    }).join('');
+  }
+
+  let zeroHtml = '';
+  if(opts.zeroLine && yMin<0 && yMax>0){
+    zeroHtml = `<line x1="${M.l}" y1="${sy(0).toFixed(1)}" x2="${W-M.r}" y2="${sy(0).toFixed(1)}" stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="3,3"/>`;
+  }
+
+  // y-axis ticks (4 steps)
+  let yTicks = '';
+  const ySteps = 4;
+  const yStepSize = (yMax-yMin)/ySteps;
+  const yTickDecimals = yStepSize < 1 ? 2 : (yStepSize < 10 ? 1 : 0);
+  const fmtYTick = v => (v===null||v===undefined||isNaN(v)) ? '—' : v.toFixed(yTickDecimals);
+  for(let i=0;i<=ySteps;i++){
+    const v = yMin + (yMax-yMin)*i/ySteps;
+    const y = sy(v);
+    yTicks += `<line x1="${M.l}" y1="${y.toFixed(1)}" x2="${W-M.r}" y2="${y.toFixed(1)}" stroke="var(--border-soft)" stroke-width="1"/>
+      <text x="${M.l-6}" y="${(y+3).toFixed(1)}" text-anchor="end" class="chart-svg-text">${fmtYTick(v)}</text>`;
+  }
+
+  // x-axis ticks based on actual x values present (thin out if crowded)
+  const xUnique = [...new Set(allPoints.map(p=>p.x))].sort((a,b)=>a-b);
+  const maxTicks = 6;
+  const xTickStride = Math.max(1, Math.ceil(xUnique.length / maxTicks));
+  const xLabelFn = opts.xLabelFn || fmt1;
+  let xTicks = xUnique.filter((x,i) => i % xTickStride === 0 || i===xUnique.length-1).map(x => {
+    const sx_ = sx(x);
+    return `<text x="${sx_.toFixed(1)}" y="${H-M.b+16}" text-anchor="middle" class="chart-svg-text">${xLabelFn(x)}</text>`;
+  }).join('');
+
+  let seriesHtml = seriesList.map(s => {
+    const pts = s.points.filter(p => p.y!==null && !isNaN(p.y));
+    if(pts.length===0) return '';
+    const path = pts.map((p,i) => `${i===0?'M':'L'} ${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
+    const dash = s.dashed ? 'stroke-dasharray="5,4"' : '';
+    const line = `<path d="${path}" stroke="${s.color}" stroke-width="2" fill="none" ${dash}/>`;
+    const dots = pts.map(p => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3" fill="${s.color}"/>`).join('');
+    return line + dots;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="xMidYMid meet">
+    ${zonesHtml}
+    ${yTicks}
+    ${zeroHtml}
+    ${xTicks}
+    ${seriesHtml}
+  </svg>`;
+}
+
+const readingTickFn = x => `#${Math.round(x)}`;
+const psigTickFn = x => `${Math.round(x)}`;
+
+// Wraps a chart's SVG with small axis-label captions (y rotated on the
+// left, x centered underneath) since the compact SVG margins don't have
+// room for labels baked into the chart itself.
+function chartWithAxisLabels(svgHtml, xLabel, yLabel){
+  if(!svgHtml) return svgHtml;
+  return `<div style="display:flex;gap:4px;">
+    <div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;color:var(--text-faint);font-family:'IBM Plex Mono',monospace;white-space:nowrap;display:flex;align-items:center;justify-content:center;">${yLabel}</div>
+    <div style="flex:1;min-width:0;">
+      ${svgHtml}
+      ${xLabel ? `<div style="text-align:center;font-size:10px;color:var(--text-faint);font-family:'IBM Plex Mono',monospace;margin-top:2px;">${xLabel}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+function buildDeviationChart(rows){
+  const points = rows.filter(r => r.shError!==null).map(r => ({x:r.idx, y:r.shError}));
+  return buildLineChart(
+    [{label:'SH deviation', color:'var(--text)', points}],
+    { zeroLine:true, xLabelFn: readingTickFn, yZones:[
+      [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
+    ]}
+  );
+}
+
+function buildShTshChart(rows){
+  const shPoints = rows.filter(r => r.actualSH!==null).map(r => ({x:r.idx, y:r.actualSH}));
+  const tshPoints = rows.filter(r => r.targetSH!==null).map(r => ({x:r.idx, y:r.targetSH}));
+  return buildLineChart([
+    {label:'SH', color:'var(--low)', points:shPoints},
+    {label:'TSH', color:'var(--text-dim)', dashed:true, points:tshPoints}
+  ], { xLabelFn: readingTickFn });
+}
+
+/* =========================================================
+   Site-level trend (across sessions, over calendar time)
+   ========================================================= */
+const dateLabelFn = x => new Date(x).toLocaleDateString([], {month:'short', day:'numeric'});
+
+function collectDeviationTrendBySite(site){
+  if(!site) return [];
+  return (site.archive || [])
+    .map(s => {
+      const rows = resolveFields(s.baseline, s.steps);
+      const baseline = rows[0];
+      return { x: s.id, y: baseline.shError, type: s.type || 'recharge' };
+    })
+    .filter(p => p.y!==null && !isNaN(p.x))
+    .sort((a,b) => a.x-b.x);
+}
+
+function collectLeakRateTrend(site){
+  if(!site) return [];
+  const recharges = (site.archive || [])
+    .filter(s => s.type !== 'checkup')
+    .map(s => ({date: s.closedAt || s.id, oz: s.summary.totalOz}))
+    .filter(p => p.oz!==null && p.oz!==undefined && !isNaN(p.date) && !isNaN(p.oz))
+    .sort((a,b) => a.date-b.date);
+  if(recharges.length===0) return [];
+
+  const points = [];
+  // First recharge on record: there's no known date the system was last
+  // "full", so there's no measured interval to divide by. Floor assumption —
+  // treat it as covering at least the last 30 days of loss. The real gap
+  // could be months or years, so this is a conservative minimum, not a
+  // measurement, and is flagged as such below.
+  points.push({x: recharges[0].date, y: recharges[0].oz/16, floor:true});
+
+  for(let i=1;i<recharges.length;i++){
+    const days = (recharges[i].date - recharges[i-1].date) / (24*60*60*1000);
+    if(days>0){
+      const ozPerMonth = recharges[i].oz/days*30;
+      points.push({x: recharges[i].date, y: ozPerMonth/16, floor:false});
+    }
+  }
+  return points;
+}
+
+function buildLeakRateTrendChart(site){
+  const points = collectLeakRateTrend(site);
+  if(points.length===0) return null;
+  return buildLineChart(
+    [{label:'lb lost/month', color:'var(--amber)', points}],
+    { xLabelFn: dateLabelFn }
+  );
+}
+
+function buildDeviationTrendChart(site){
+  const points = collectDeviationTrendBySite(site);
+  if(points.length===0) return null;
+  return buildLineChart(
+    [{label:'as-found SH deviation', color:'var(--text)', points}],
+    { zeroLine:true, xLabelFn: dateLabelFn,
+      yZones:[
+        [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
+      ]}
+  );
+}
+
+function computeLeakForecast(site){
+  const recharges = (site.archive || [])
+    .filter(s => s.type !== 'checkup')
+    .map(s => ({date: s.closedAt || s.id, oz: s.summary.totalOz}))
+    .filter(p => p.oz!==null && p.oz!==undefined && !isNaN(p.date) && !isNaN(p.oz))
+    .sort((a,b) => a.date-b.date);
+
+  if(recharges.length === 0){
+    return { possible:false, reason: 'No completed recharges on record yet for this site.' };
+  }
+
+  // First recharge: no known "last full" date, so assume a conservative
+  // floor of 30 days of loss (see collectLeakRateTrend). Every recharge
+  // after that uses a real measured interval.
+  let totalOz = recharges[0].oz, totalDays = 30;
+  for(let i=1;i<recharges.length;i++){
+    const days = (recharges[i].date - recharges[i-1].date) / (24*60*60*1000);
+    if(days>0){ totalOz += recharges[i].oz; totalDays += days; }
+  }
+  if(totalDays<=0 || totalOz<=0){
+    return { possible:false, reason: 'Not enough data yet to estimate a rate.' };
+  }
+  const ozPerDay = totalOz/totalDays;
+
+  const lastRecharge = recharges[recharges.length-1];
+  const daysSinceLast = (Date.now() - lastRecharge.date) / (24*60*60*1000);
+  const currentDeficitEstimate = ozPerDay * Math.max(0,daysSinceLast);
+
+  const typicalTriggerOz = recharges.reduce((sum,r)=>sum+r.oz,0) / recharges.length;
+
+  let daysUntilNext = null, projectedDate = null;
+  if(currentDeficitEstimate < typicalTriggerOz){
+    daysUntilNext = (typicalTriggerOz - currentDeficitEstimate) / ozPerDay;
+    projectedDate = new Date(Date.now() + daysUntilNext*24*60*60*1000);
+  } else {
+    daysUntilNext = 0;
+    projectedDate = new Date();
+  }
+
+  return {
+    possible:true,
+    ozPerDay, ozPerMonth: ozPerDay*30,
+    daysSinceLast, currentDeficitEstimate, typicalTriggerOz,
+    daysUntilNext, projectedDate,
+    basedOnIntervals: recharges.length,
+    singleRechargeFloor: recharges.length===1
+  };
+}
+
+/* =========================================================
+   Rendering
+   ========================================================= */
+// Roland Stull (2011) wet-bulb approximation from dry-bulb temp + RH.
+// Formula is calibrated for T in °C, RH in %, atan in radians (JS's Math.atan).
+// Valid roughly for RH 5-99% and T -20 to 50°C; outside that it degrades.
+function stullWetBulbC(tC, rhPct){
+  if(isNaN(tC) || isNaN(rhPct)) return null;
+  const atan = Math.atan;
+  return tC*atan(0.151977*Math.sqrt(rhPct+8.313659))
+    + atan(tC+rhPct) - atan(rhPct-1.676331)
+    + 0.00391838*Math.pow(rhPct,1.5)*atan(0.023101*rhPct)
+    - 4.686035;
+}
+function calcIDWBStullF(tempF, rhPct){
+  if(isNaN(tempF) || isNaN(rhPct)) return null;
+  const tC = (tempF-32)*5/9;
+  const wbC = stullWetBulbC(tC, rhPct);
+  if(wbC===null) return null;
+  return wbC*9/5+32;
+}
+
+// Reusable "Indoor dry-bulb + RH -> Calculate IDWB" helper block, used
+// wherever an IDWB field appears (baseline, ambient recheck, step entry).
+// prefix distinguishes the field ids per panel (e.g. 'b', 'a', 's').
+function wbHelperBlock(prefix, idwbFieldId, opts={}){
+  const iddbLabel = opts.abbrevLabels ? 'IDDB — Indoor dry-bulb' : 'Indoor dry-bulb (IDDB)';
+  const rhLabel = opts.abbrevLabels ? 'RH — Indoor relative humidity' : 'Indoor RH';
+  const gridStyle = opts.abbrevLabels ? ' style="grid-template-columns:1fr 1fr;"' : '';
+  return `
+    <div class="wb-helper" data-prefix="${prefix}">
+      <div class="field-grid"${gridStyle}>
+        ${fieldNumber(prefix+'iddb',iddbLabel,{step:'0.1',placeholder:'°F, optional'})}
+        ${fieldNumber(prefix+'rh',rhLabel,{step:'1',placeholder:'%, optional'})}
+      </div>
+      <div class="btn-row" style="margin-top:12px;">
+        <button type="button" class="btn ghost" data-calcwb-target="${idwbFieldId}" data-iddb="${prefix}iddb" data-rh="${prefix}rh">Calculate IDWB</button>
+      </div>
+      <div class="wb-note" data-wbnote-for="${idwbFieldId}"></div>
+    </div>`;
+}
+function wireWbHelpers(root){
+  (root || document).querySelectorAll('[data-calcwb-target]').forEach(btn => {
+    btn.onclick = () => {
+      const targetEl = document.getElementById(btn.dataset.calcwbTarget);
+      const iddbEl = document.getElementById(btn.dataset.iddb);
+      const rhEl = document.getElementById(btn.dataset.rh);
+      const noteEl = (root || document).querySelector(`[data-wbnote-for="${btn.dataset.calcwbTarget}"]`);
+      if(!targetEl || !iddbEl || !rhEl) return;
+      const iddb = Number(iddbEl.value), rh = Number(rhEl.value);
+      if(iddbEl.value===''||rhEl.value===''||isNaN(iddb)||isNaN(rh)){
+        if(noteEl) noteEl.textContent = 'Enter both indoor dry-bulb and RH first.';
+        return;
+      }
+      const wb = calcIDWBStullF(iddb, rh);
+      if(wb===null) return;
+      targetEl.value = (Math.round(wb*10)/10).toString();
+      if(noteEl) noteEl.textContent = `Approximated from ${fmt1(iddb)}°F / ${fmt1(rh)}% RH — use a measured IDWB instead when you have one.`;
+    };
+  });
+}
+
+function fieldNumber(id, label, opts={}){
+  const req = opts.required ? 'required' : '';
+  const cls = ['field', opts.required?'required':'', opts.tone||''].join(' ').trim();
+  const val = opts.value!==undefined && opts.value!==null ? opts.value : '';
+  const note = opts.note ? `<div class="field-note">${opts.note}</div>` : '';
+  return `<div class="${cls}">
+    <label>${label}${opts.optLabel?`<span class="opt">${opts.optLabel}</span>`:''}</label>
+    <input type="number" inputmode="decimal" step="${opts.step||'0.1'}" id="${id}" value="${val}" placeholder="${opts.placeholder||''}" ${req}>
+    ${note}
+  </div>`;
+}
+
+function renderSitePanel(){
+  const el = document.getElementById('sitePanel');
+  const site = currentSite();
+
+  if(sites.length===0){
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">Set up a site</div>
+        <span class="tag">One-time</span>
+      </div>
+      <p class="subhead" style="margin-top:-6px;">A site is one physical system — its history stays with it, and estimates only ever use that site's own data.</p>
+      <div class="field-grid">
+        <div class="field required"><label>Site name</label><input type="text" id="siteName" placeholder="e.g. Home"></div>
+        <div class="field"><label>Nameplate charge<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="1" id="siteOz" placeholder="oz, from condenser label"></div>
+        <div class="field"><label>System size<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="0.5" id="siteTons" placeholder="tons"></div>
+      </div>
+      <div class="status-line">Refrigerant: R-22 · Metering: Fixed-orifice (only options supported right now)</div>
+      <div class="btn-row">
+        <button class="btn primary" id="createSiteBtn">Create site</button>
+        <button class="btn ghost" id="demoSiteBtn">Add demo site instead</button>
+        <button class="btn ghost" id="emptyImportTriggerBtn">Import a site</button>
+        <input type="file" id="emptyImportFile" accept="application/json">
+      </div>
+    `;
+    document.getElementById('createSiteBtn').onclick = onCreateSite;
+    document.getElementById('demoSiteBtn').onclick = onAddDemoSite;
+    const emptyImportFile = document.getElementById('emptyImportFile');
+    document.getElementById('emptyImportTriggerBtn').onclick = () => emptyImportFile.click();
+    emptyImportFile.onchange = () => {
+      if(emptyImportFile.files && emptyImportFile.files[0]){
+        importSiteFile(emptyImportFile.files[0]);
+        emptyImportFile.value = '';
+      }
+    };
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Site</div>
+      <span class="tag">${site.archive.length + (site.active?1:0)} session${(site.archive.length + (site.active?1:0))===1?'':'s'} on record</span>
+    </div>
+    <div class="site-row">
+      <select id="siteSelect">
+        ${sites.map(s => `<option value="${s.id}" ${s.id===currentSiteId?'selected':''}>${s.name}</option>`).join('')}
+      </select>
+      <button class="btn ghost" id="newSiteBtn" style="font-size:12px;padding:6px 12px;">New site</button>
+      <button class="btn ghost" id="editSiteBtn" style="font-size:12px;padding:6px 12px;">Edit</button>
+      <button class="btn ghost" id="demoSiteBtn2" style="font-size:12px;padding:6px 12px;">Add demo site</button>
+      <button class="btn danger" id="deleteSiteBtn" style="font-size:12px;padding:6px 12px;">Delete site</button>
+    </div>
+    <div class="site-info-strip">
+      <div class="item"><div class="k">Refrigerant</div><div class="v">${site.refrigerant}</div></div>
+      <div class="item"><div class="k">Metering</div><div class="v">${site.meteringType}</div></div>
+      <div class="item"><div class="k">Nameplate charge</div><div class="v">${site.nameplateOz ? site.nameplateOz+' oz ('+fmt2(site.nameplateOz/16)+' lb)' : '—'}</div></div>
+      <div class="item"><div class="k">System size</div><div class="v">${site.tons ? site.tons+' ton' : '—'}</div></div>
+    </div>
+    <div id="siteEditForm"></div>
+    <div class="backup-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-soft);">
+      <button class="btn ghost" id="siteExportBtn" style="font-size:12px;padding:6px 12px;">Export this site (.json)</button>
+      <button class="btn ghost" id="siteImportTriggerBtn" style="font-size:12px;padding:6px 12px;">Import a site</button>
+      <input type="file" id="siteImportFile" accept="application/json">
+    </div>
+    <div class="backup-note">Move just "${site.name}" to another device, or hand it to yourself later — named after the site so it's easy to tell apart from others. For everything at once, use Backup at the bottom of the page.</div>
+  `;
+  document.getElementById('siteSelect').onchange = (e) => onSwitchSite(e.target.value);
+  document.getElementById('newSiteBtn').onclick = onShowNewSiteForm;
+  document.getElementById('editSiteBtn').onclick = onShowEditSiteForm;
+  document.getElementById('demoSiteBtn2').onclick = onAddDemoSite;
+  document.getElementById('deleteSiteBtn').onclick = onDeleteSite;
+  document.getElementById('siteExportBtn').onclick = exportSite;
+  const siteImportFile = document.getElementById('siteImportFile');
+  document.getElementById('siteImportTriggerBtn').onclick = () => siteImportFile.click();
+  siteImportFile.onchange = () => {
+    if(siteImportFile.files && siteImportFile.files[0]){
+      importSiteFile(siteImportFile.files[0]);
+      siteImportFile.value = '';
+    }
+  };
+}
+
+let siteFormMode = null; // null | 'new' | 'edit'
+
+function onShowNewSiteForm(){
+  siteFormMode = 'new';
+  renderSiteEditForm();
+}
+function onShowEditSiteForm(){
+  siteFormMode = 'edit';
+  renderSiteEditForm();
+}
+function renderSiteEditForm(){
+  const el = document.getElementById('siteEditForm');
+  if(!el) return;
+  if(!siteFormMode){ el.innerHTML=''; return; }
+  const site = siteFormMode==='edit' ? currentSite() : null;
+  el.innerHTML = `
+    <div class="ambient-form">
+      <div class="field-grid">
+        <div class="field required"><label>Site name</label><input type="text" id="siteFormName" value="${site?site.name:''}" placeholder="e.g. Home"></div>
+        <div class="field"><label>Nameplate charge<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="1" id="siteFormOz" value="${site&&site.nameplateOz?site.nameplateOz:''}" placeholder="oz"></div>
+        <div class="field"><label>System size<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="0.5" id="siteFormTons" value="${site&&site.tons?site.tons:''}" placeholder="tons"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="siteFormSaveBtn">${siteFormMode==='edit'?'Save changes':'Create site'}</button>
+        <button class="btn ghost" id="siteFormCancelBtn">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('siteFormSaveBtn').onclick = onSaveSiteForm;
+  document.getElementById('siteFormCancelBtn').onclick = () => { siteFormMode=null; renderSiteEditForm(); };
+}
+
+async function onSaveSiteForm(){
+  const name = document.getElementById('siteFormName').value.trim();
+  if(!name) return;
+  const nameplateOz = document.getElementById('siteFormOz').value;
+  const tons = document.getElementById('siteFormTons').value;
+  if(siteFormMode==='new'){
+    const site = { id:newSiteId(), name, refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz, tons, createdAt:Date.now(), active:null, archive:[] };
+    sites.push(site);
+    currentSiteId = site.id;
+  } else {
+    const site = currentSite();
+    site.name = name; site.nameplateOz = nameplateOz; site.tons = tons;
+  }
+  siteFormMode = null;
+  syncActiveArchiveFromSite();
+  await saveSites();
+  renderAll();
+}
+
+async function onCreateSite(){
+  const name = document.getElementById('siteName').value.trim();
+  if(!name){ document.getElementById('siteName').focus(); return; }
+  const nameplateOz = document.getElementById('siteOz').value;
+  const tons = document.getElementById('siteTons').value;
+  const site = { id:newSiteId(), name, refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz, tons, createdAt:Date.now(), active:null, archive:[] };
+  sites.push(site);
+  currentSiteId = site.id;
+  syncActiveArchiveFromSite();
+  await saveSites();
+  renderAll();
+}
+
+async function onSwitchSite(id){
+  editingRowIdx = null;
+  currentSiteId = id;
+  syncActiveArchiveFromSite();
+  clearTimer();
+  expandedArchiveIdx = null;
+  siteFormMode = null;
+  await saveSites();
+  renderAll();
+}
+
+async function onDeleteSite(){
+  const site = currentSite();
+  if(!site) return;
+  const ok = await showConfirmModal(`Delete "${site.name}" and all its session history? This can't be undone.`);
+  if(!ok) return;
+  sites = sites.filter(s => s.id !== site.id);
+  currentSiteId = sites.length ? sites[0].id : null;
+  syncActiveArchiveFromSite();
+  await saveSites();
+  renderAll();
+}
+
+async function onAddDemoSite(){
+  const demo = buildDemoSite();
+  sites.push(demo);
+  currentSiteId = demo.id;
+  syncActiveArchiveFromSite();
+  await saveSites();
+  renderAll();
+}
+
+function buildDemoSite(){
+  const now = Date.now();
+  const day = 24*60*60*1000;
+  const sessionA = {
+    id: now - 75*day, type:'recharge', createdAt: now-75*day, closedAt: now-75*day+40*60*1000,
+    baseline: {
+      jugWeight:25.00, lowPsig:42, highPsig:215, suctionTemp:64, outdoorDB:78, indoorWB:68, liquidTemp:80,
+      notes:'Demo data — annual checkup found low charge', timestamp: now-75*day
+    },
+    steps: [
+      {jugWeight:24.75, lowPsig:52, highPsig:222, suctionTemp:62, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+15*60*1000},
+      {jugWeight:24.50, lowPsig:60, highPsig:228, suctionTemp:60, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+35*60*1000}
+    ],
+    finalWeight: 24.50, finalWeightAt: now-75*day+35*60*1000, finalWeightAtStr: tsStr(now-75*day+35*60*1000)
+  };
+  const rowsA = resolveFields(sessionA.baseline, sessionA.steps);
+  const lastA = rowsA[rowsA.length-1];
+  const measuredA = sessionMeasuredTotalOz(sessionA);
+  sessionA.summary = { totalOz: measuredA!==null?measuredA:lastA.totalOz, finalError:lastA.shError, stepCount:sessionA.steps.length };
+
+  const sessionB = {
+    id: now - 20*day, type:'recharge', createdAt: now-20*day, closedAt: now-20*day+45*60*1000,
+    baseline: {
+      jugWeight:26.00, lowPsig:44, highPsig:250, suctionTemp:70, outdoorDB:92, indoorWB:69, liquidTemp:88,
+      notes:'Demo data — hot week, tenant reported weak cooling', timestamp: now-20*day
+    },
+    steps: [
+      {jugWeight:25.70, lowPsig:52, highPsig:258, suctionTemp:67, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+15*60*1000},
+      {jugWeight:25.35, lowPsig:58, highPsig:264, suctionTemp:65, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+40*60*1000}
+    ],
+    finalWeight: 25.35, finalWeightAt: now-20*day+40*60*1000, finalWeightAtStr: tsStr(now-20*day+40*60*1000)
+  };
+  const rowsB = resolveFields(sessionB.baseline, sessionB.steps);
+  const lastB = rowsB[rowsB.length-1];
+  const measuredB = sessionMeasuredTotalOz(sessionB);
+  sessionB.summary = { totalOz: measuredB!==null?measuredB:lastB.totalOz, finalError:lastB.shError, stepCount:sessionB.steps.length };
+
+  return {
+    id: newSiteId(), name:'Demo site (learn the tool)', refrigerant:'R-22', meteringType:'Fixed-orifice',
+    nameplateOz:79, tons:3.5, createdAt: now-75*day,
+    active: null,
+    archive: [sessionB, sessionA]
+  };
+}
+
+let pendingSessionType = 'checkup';
+
+function renderBaselinePanel(){
+  const el = document.getElementById('baselinePanel');
+  if(!currentSite()){ el.style.display='none'; return; }
+  el.style.display = 'block';
+
+  if(!active){
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">Start a session</div>
+        <span class="tag">Baseline</span>
+      </div>
+      <div class="type-toggle">
+        <button class="btn ${pendingSessionType==='checkup'?'active':'ghost'}" id="typeCheckupBtn">Checkup</button>
+        <button class="btn ${pendingSessionType==='recharge'?'active':'ghost'}" id="typeRechargeBtn">Recharge</button>
+      </div>
+      <p class="subhead" style="margin-top:-6px;">${pendingSessionType==='recharge'
+        ? 'Enter the system\'s pre-charge readings before adding any refrigerant.'
+        : 'Just reading gauges, not charging — no jug needed. Good for periodic verification between recharges.'}</p>
+      ${baselinePrefill ? `<div class="status-line" style="margin:-6px 0 14px;">Outdoor/indoor conditions carried over from the duplicated session — readings still need a fresh measurement. <button class="btn ghost" id="clearPrefillBtn">Clear</button></div>` : ''}
+      ${pendingSessionType==='recharge' ? `
+      <div class="field-grid">
+        ${fieldNumber('bw','Starting jug weight (scale)',{required:true,step:'0.01',placeholder:'e.g. 24.60',note:'lb, before any refrigerant is added — this and the final weight when you finish are the only two weigh-ins for the whole session'})}
+      </div>
+      ` : ''}
+      <div class="field-grid" style="grid-template-columns:1fr 1fr;">
+        ${fieldNumber('blow','LOW — Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig'})}
+        ${fieldNumber('bhigh','HIGH — High-side pressure',{required:true,tone:'high',step:'1',placeholder:'psig'})}
+        ${fieldNumber('bliquid','LLT — Liquid line temp',{step:'0.1',placeholder:'°F, for subcooling'})}
+        ${fieldNumber('bsuction','SLT — Suction line temp',{required:true,step:'0.1',placeholder:'°F'})}
+        ${fieldNumber('bodb','ODDB — Outdoor dry-bulb',{step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.outdoorDB):''})}
+        ${fieldNumber('biwb','IDWB — Indoor wet-bulb',{step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.indoorWB):''})}
+      </div>
+      ${pendingSessionType==='recharge' ? `
+      <div class="field" style="margin-top:12px;">
+        <label>Weight at baseline<span class="opt">optional</span></label>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <input type="number" inputmode="decimal" step="0.01" id="bweight" placeholder="lb" style="flex:1;min-width:100px;">
+          <div class="field-note" style="margin:0;">only if you can weigh with hoses already attached, before opening the valve — lets step 1's added amount be calculated instead of unknown. Same rules as step weight: if using a Tared mid-charge scale, enter 0 here.</div>
+        </div>
+      </div>
+      ` : ''}
+      ${wbHelperBlock('b','biwb',{abbrevLabels:true})}
+      <div class="field" style="margin-top:12px;">
+        <label>Notes<span class="opt">optional</span></label>
+        <input type="text" id="bnotes" placeholder="e.g. R-22, aging condenser, low charge suspected">
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="startBtn">Start ${pendingSessionType==='recharge'?'session':'checkup'}</button>
+      </div>
+      <div id="baselineErr" class="warn-line" style="display:none;"></div>
+    `;
+    document.getElementById('typeRechargeBtn').onclick = () => { pendingSessionType='recharge'; renderBaselinePanel(); };
+    document.getElementById('typeCheckupBtn').onclick = () => { pendingSessionType='checkup'; renderBaselinePanel(); };
+    document.getElementById('startBtn').onclick = onStartSession;
+    const clearBtn = document.getElementById('clearPrefillBtn');
+    if(clearBtn) clearBtn.onclick = () => { baselinePrefill = null; renderAll(); };
+    wireWbHelpers(el);
+  } else {
+    const b = active.baseline;
+    const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite())});
+    const last = rows[rows.length-1];
+    const isCheckup = active.type === 'checkup';
+    const measuredTotal = sessionMeasuredTotalOz(active);
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">${isCheckup?'Checkup':'Session'} in progress</div>
+        <span class="tag">Started ${new Date(active.createdAt).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span>
+      </div>
+      <div class="strip">
+        ${isCheckup ? `
+          <div class="item"><div class="k">Type</div><div class="v">Checkup</div></div>
+          <div class="item"><div class="k">Readings logged</div><div class="v">${active.steps.length+1}</div></div>
+        ` : `
+          <div class="item"><div class="k">Total added</div><div class="v">${measuredTotal===null?'—':lbOz(measuredTotal)}</div></div>
+          <div class="item"><div class="k">Steps logged</div><div class="v">${active.steps.length}</div></div>
+        `}
+      </div>
+      ${!isCheckup ? `
+      <div class="field-grid" style="margin-top:12px;">
+        ${fieldNumber('startWeightInput','Starting weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:b.jugWeight!=null?b.jugWeight:''})}
+        ${fieldNumber('finalWeightInput','Final weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:active.finalWeight!=null?active.finalWeight:''})}
+        <div class="field"><label>&nbsp;</label><button class="btn ghost" id="saveFinalWeightBtn" style="width:100%;">Update weight</button></div>
+      </div>
+      ` : ''}
+      <div class="btn-row">
+        <button class="btn primary" id="archiveBtn">Close ${isCheckup?'checkup':'session'}</button>
+      </div>
+    `;
+    document.getElementById('archiveBtn').onclick = onArchiveSession;
+    const saveFinalWeightBtn = document.getElementById('saveFinalWeightBtn');
+    if(saveFinalWeightBtn) saveFinalWeightBtn.onclick = onUpdateWeights;
+  }
+}
+
+function onUpdateWeights(){
+  const startV = document.getElementById('startWeightInput').value;
+  const finalV = document.getElementById('finalWeightInput').value;
+  if(startV !== ''){
+    active.baseline.jugWeight = Number(startV);
+  }
+  if(finalV !== ''){
+    const now = Date.now();
+    active.finalWeight = Number(finalV);
+    active.finalWeightAt = now;
+    active.finalWeightAtStr = tsStr(now);
+  } else {
+    active.finalWeight = undefined;
+    active.finalWeightAt = undefined;
+    active.finalWeightAtStr = undefined;
+  }
+  saveActive();
+  renderAll();
+}
+
+// Epoch ms stays the source of truth for all calculations; timestampStr is
+// just a human-readable companion for anyone opening the exported JSON by hand.
+function tsStr(ms){ return ms ? new Date(ms).toLocaleString() : null; }
+
+function onStartSession(){
+  editingRowIdx = null;
+  const req = pendingSessionType==='recharge' ? ['bw','blow','bhigh','bsuction'] : ['blow','bhigh','bsuction'];
+  const errEl = document.getElementById('baselineErr');
+  for(const id of req){
+    const v = document.getElementById(id).value;
+    if(v===''){
+      errEl.textContent = pendingSessionType==='recharge'
+        ? 'Fill in jug weight, low/high pressure, and suction temp to start.'
+        : 'Fill in low/high pressure and suction temp to start.';
+      errEl.style.display = 'block';
+      return;
+    }
+  }
+  const now = Date.now();
+  const bweightEl = document.getElementById('bweight');
+  const baseline = {
+    jugWeight: pendingSessionType==='recharge' ? Number(document.getElementById('bw').value) : undefined,
+    chargeWeight: (bweightEl && bweightEl.value!=='') ? Number(bweightEl.value) : undefined,
+    lowPsig: Number(document.getElementById('blow').value),
+    highPsig: Number(document.getElementById('bhigh').value),
+    suctionTemp: Number(document.getElementById('bsuction').value),
+    outdoorDB: document.getElementById('bodb').value,
+    indoorWB: document.getElementById('biwb').value,
+    indoorDB: document.getElementById('biddb').value,
+    indoorRH: document.getElementById('brh').value,
+    liquidTemp: document.getElementById('bliquid').value,
+    notes: document.getElementById('bnotes').value,
+    timestamp: now,
+    timestampStr: tsStr(now)
+  };
+  active = { createdAt: now, createdAtStr: tsStr(now), type: pendingSessionType, baseline, steps: [] };
+  baselinePrefill = null;
+  saveActive();
+  renderAll();
+}
+
+async function onArchiveSession(){
+  if(!active) return;
+  editingRowIdx = null;
+  const wantsExport = await showConfirmModal('Export a backup before closing this out?');
+  if(wantsExport){
+    await exportSite();
+  }
+  const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite())});
+  const last = rows[rows.length-1];
+  const measuredTotal = sessionMeasuredTotalOz(active);
+  const now = Date.now();
+  archive.unshift({
+    id: active.createdAt,
+    type: active.type || 'recharge',
+    closedAt: now,
+    closedAtStr: new Date(now).toLocaleString(),
+    baseline: active.baseline,
+    steps: active.steps,
+    finalWeight: active.finalWeight!=null ? active.finalWeight : undefined,
+    finalWeightAt: active.finalWeightAt || undefined,
+    finalWeightAtStr: active.finalWeightAtStr || undefined,
+    summary: { totalOz: measuredTotal!==null ? measuredTotal : last.totalOz, finalError: last.shError, stepCount: active.steps.length }
+  });
+  active = null;
+  await saveArchive();
+  await saveActive();
+  renderAll();
+}
+
+let ambientFormOpen = false;
+
+function renderAmbientPanel(){
+  const el = document.getElementById('ambientPanel');
+  if(!active){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const rows = resolveFields(active.baseline, active.steps);
+  const last = rows[rows.length-1];
+  const ambientRows = rows.filter(r => r.ambientProvided);
+  const lastAmbientRow = ambientRows[ambientRows.length-1];
+  const stepsSince = last.idx - lastAmbientRow.idx;
+  const hint = stepsSince>=3
+    ? `<div class="ambient-hint">Confirmed ${stepsSince} steps ago — worth rechecking if the weather, load, or airflow has shifted since then.</div>`
+    : '';
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Ambient conditions</div>
+      <span class="tag">Used for target superheat</span>
+    </div>
+    <div class="ambient-summary">
+      <div class="txt">
+        ODDB <b>${fmt1(last.outdoorDB)}°F</b> · IDWB <b>${fmt1(last.indoorWB)}°F</b> · LLT <b>${fmt1(last.liquidTemp)}°F</b><br>
+        <span style="color:var(--text-faint)">Last confirmed at ${lastAmbientRow.isBaseline ? 'baseline' : 'step '+lastAmbientRow.idx}</span>
+      </div>
+      <button class="btn ghost" id="ambientToggleBtn">${ambientFormOpen ? 'Cancel' : 'Recheck now'}</button>
+    </div>
+    ${hint}
+    ${ambientFormOpen ? `
+      <div class="ambient-form">
+        <p class="subhead" style="margin:0 0 12px;">Only edit what's changed — everything else stays as last logged, this just refreshes conditions.</p>
+        <div class="field-grid">
+          ${fieldNumber('aodb','Outdoor dry-bulb (ODDB)',{step:'0.1',value:numOrEmpty(last.outdoorDB)})}
+          ${fieldNumber('aiwb','Indoor wet-bulb (IDWB)',{step:'0.1',value:numOrEmpty(last.indoorWB)})}
+          ${fieldNumber('aliquid','Liquid line temp (LLT)',{step:'0.1',value:numOrEmpty(last.liquidTemp)})}
+        </div>
+        ${wbHelperBlock('a','aiwb')}
+        <div class="btn-row">
+          <button class="btn primary" id="ambientSaveBtn">Save updated conditions</button>
+        </div>
+      </div>
+    ` : ''}
+  `;
+  document.getElementById('ambientToggleBtn').onclick = () => { ambientFormOpen = !ambientFormOpen; renderAmbientPanel(); };
+  const saveBtn = document.getElementById('ambientSaveBtn');
+  if(saveBtn) saveBtn.onclick = onAmbientRecheck;
+  wireWbHelpers(el);
+}
+
+function onAmbientRecheck(){
+  const rows = resolveFields(active.baseline, active.steps);
+  const last = rows[rows.length-1];
+  const now = Date.now();
+  const entry = {
+    lowPsig: last.lowPsig,
+    highPsig: last.highPsig,
+    suctionTemp: last.suctionTemp,
+    outdoorDB: document.getElementById('aodb').value,
+    indoorWB: document.getElementById('aiwb').value,
+    indoorDB: document.getElementById('aiddb').value,
+    indoorRH: document.getElementById('arh').value,
+    liquidTemp: document.getElementById('aliquid').value,
+    notes: 'Ambient conditions recheck',
+    ambientOnly: true,
+    timestamp: now,
+    timestampStr: tsStr(now)
+  };
+  active.steps.push(entry);
+  saveActive();
+  ambientFormOpen = false;
+  renderAll();
+}
+
+function renderStepPanel(){
+  const el = document.getElementById('stepPanel');
+  if(!active){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const isCheckup = active.type === 'checkup';
+  const rows = resolveFields(active.baseline, active.steps);
+  const last = rows[rows.length-1];
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Log a reading</div>
+      <span class="tag">After stabilizing 5–10 min${isCheckup?'':', manifold valve closed'}</span>
+    </div>
+    <div class="field-grid" style="grid-template-columns:1fr 1fr;">
+      ${fieldNumber('slow','Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig',note:`last: ${fmt1(last.lowPsig)}`})}
+      ${fieldNumber('shigh','High-side pressure',{required:true,tone:'high',step:'1',placeholder:'psig',note:`last: ${fmt1(last.highPsig)}`})}
+      ${fieldNumber('ssuction','Suction line temp (SLT)',{required:true,step:'0.1',placeholder:'°F',note:`last: ${fmt1(last.suctionTemp)}°F`})}
+      ${fieldNumber('sliquid','Liquid line temp (LLT)',{step:'0.1',placeholder:`${fmt1(last.liquidTemp)}`,optLabel:'optional'})}
+    </div>
+    <div class="field" style="margin-top:12px;">
+      <label>Weight<span class="opt">optional</span></label>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <input type="number" inputmode="decimal" step="0.01" id="sweight" placeholder="lb" style="flex:1;min-width:100px;">
+        <div class="field-note" style="margin:0;">only if you can weigh mid-charge — enter the jug+hoses weight, or if your scale has a Tare button, zero it at your first weighed reading and enter the running total it shows from then on (negative is fine, we just track the size of the change)</div>
+      </div>
+    </div>
+    <details class="more">
+      <summary>Other readings — reused from last step unless changed</summary>
+      <div class="field-grid" style="grid-template-columns:1fr 1fr;">
+        ${fieldNumber('sodb','Outdoor dry-bulb (ODDB)',{step:'0.1',placeholder:`${fmt1(last.outdoorDB)}`})}
+        ${fieldNumber('siwb','Indoor wet-bulb (IDWB)',{step:'0.1',placeholder:`${fmt1(last.indoorWB)}`})}
+      </div>
+      ${wbHelperBlock('s','siwb')}
+      <div class="field" style="margin-top:12px;">
+        <label>Notes<span class="opt">optional</span></label>
+        <input type="text" id="snotes" placeholder="anything worth remembering about this step">
+      </div>
+    </details>
+    <div class="btn-row">
+      <button class="btn primary" id="addStepBtn">Log this reading</button>
+      ${active.steps.length>0 ? '<button class="btn danger" id="undoStepBtn">Undo last step</button>' : ''}
+    </div>
+    <div id="stepErr" class="warn-line" style="display:none;"></div>
+  `;
+  document.getElementById('addStepBtn').onclick = onAddStep;
+  if(document.getElementById('undoStepBtn')) document.getElementById('undoStepBtn').onclick = onUndoStep;
+  wireWbHelpers(el);
+}
+
+function onAddStep(){
+  const isCheckup = active.type === 'checkup';
+  const req = ['slow','shigh','ssuction'];
+  const errEl = document.getElementById('stepErr');
+  for(const id of req){
+    if(document.getElementById(id).value===''){
+      errEl.textContent = 'Low/high pressure and suction temp are required for every reading.';
+      errEl.style.display = 'block';
+      return;
+    }
+  }
+  const now = Date.now();
+  const weightVal = document.getElementById('sweight').value;
+  const step = {
+    lowPsig: Number(document.getElementById('slow').value),
+    highPsig: Number(document.getElementById('shigh').value),
+    suctionTemp: Number(document.getElementById('ssuction').value),
+    jugWeight: weightVal==='' ? undefined : Number(weightVal),
+    outdoorDB: document.getElementById('sodb').value,
+    indoorWB: document.getElementById('siwb').value,
+    indoorDB: document.getElementById('siddb').value,
+    indoorRH: document.getElementById('srh').value,
+    liquidTemp: document.getElementById('sliquid').value,
+    notes: document.getElementById('snotes').value,
+    timestamp: now,
+    timestampStr: tsStr(now)
+  };
+  errEl.style.display = 'none';
+  active.steps.push(step);
+  saveActive();
+  clearTimer();
+  renderAll();
+}
+
+function onUndoStep(){
+  active.steps.pop();
+  saveActive();
+  clearTimer();
+  renderAll();
+}
+
+function splitColor(v){
+  if(v===null||v===undefined||isNaN(v)) return 'var(--text-dim)';
+  if(v>=20 && v<=35) return 'var(--green)';
+  if((v>=15&&v<20) || (v>35&&v<=45)) return 'var(--amber)';
+  return 'var(--red)';
+}
+
+function renderResultsPanel(){
+  const el = document.getElementById('resultsPanel');
+  if(!active){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const isCheckup = active.type === 'checkup';
+  const predictRate = buildPredictRateForSite(currentSite());
+  const rows = resolveFields(active.baseline, active.steps, {predictRate});
+  const row = rows[rows.length-1];
+  const reco = recommendation(row, active.type);
+  const recoClass = {add:'add',stop:'stop',warn:'warn',idle:'idle'}[reco.level];
+
+  let rateStatusLine = '';
+  if(row.estRateSource==='historical' && row.estRatePrediction){
+    const p = row.estRatePrediction;
+    const conf = p.confidence==='single' ? 'from one prior session' : (p.extrapolated ? `fit from ${p.basedOn} past readings — today's ODDB is outside the range seen before, so treat this as rougher` : `fit from ${p.basedOn} past readings at similar ODDB`);
+    rateStatusLine = `<div class="status-line">Estimate borrows this site's history: ~${fmt2(row.estRate)}°F/oz (${conf}). ${row.lbPerDegree!==null?`≈ ${fmt3(row.lbPerDegree)} lb per °F.`:''}</div>`;
+  } else if(!isCheckup && active.steps.length===0){
+    rateStatusLine = `<div class="status-line">No history yet for this site — the estimate above uses the rule-of-thumb amounts until a few sessions have built up a track record.</div>`;
+  }
+
+  const measuredTotal = !isCheckup ? sessionMeasuredTotalOz(active) : null;
+
+  let addedEstLine = '';
+  if(!isCheckup){
+    const parts = [];
+    if(measuredTotal!==null) parts.push(`Total added so far: ${lbOz(measuredTotal)}`);
+    if(row.estRemainingOz!==null) parts.push(`Est. remaining: ${lbOz(row.estRemainingOz)}`);
+    if(parts.length) addedEstLine = `<div class="rs" style="margin-top:6px;">${parts.join(' · ')}</div>`;
+  } else if(row.estRemainingOz!==null){
+    addedEstLine = `<div class="rs" style="margin-top:6px;">Est. deficit if recharged: ${lbOz(row.estRemainingOz)}</div>`;
+  }
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Superheat targets</div>
+      <span class="tag">${row.isBaseline ? 'Baseline reading' : `${isCheckup?'Reading':'Step'} ${row.idx}`}</span>
+    </div>
+    <div class="gauge-row">
+      <div class="gauge-wrap">
+        ${buildSHGauge(row.shError)}
+        <div class="gauge-readout">
+          <div class="val" style="color:${row.shError===null?'var(--text-dim)':(Math.abs(row.shError)<=3?'var(--green)':(Math.abs(row.shError)<=10?'var(--amber)':'var(--red)'))}">${row.shError===null?'—':(row.shError>0?'+':'')+fmt1(row.shError)}</div>
+          <div class="lbl">SH deviation °F</div>
+        </div>
+      </div>
+      <div class="readout-grid">
+        <div class="ro"><div class="k">VSAT — Low sat. temp</div><div class="v low">${fmt1(row.vsat)}°F</div></div>
+        <div class="ro"><div class="k">SLT — Suction line temp</div><div class="v">${fmt1(row.suctionTemp)}°F</div></div>
+        <div class="ro"><div class="k">SH — Actual superheat</div><div class="v">${fmt1(row.actualSH)}°F</div></div>
+        <div class="ro"><div class="k">LOW — Low-side pressure</div><div class="v low">${fmt1(row.lowPsig)} psig</div></div>
+        <div class="ro"><div class="k">TSH — Target superheat</div><div class="v">${fmt1(row.targetSH)}°F</div></div>
+        <div class="ro"><div class="k">Target LOW — Target low-side pressure</div><div class="v low">${row.targetLowPsig===null?'—':Math.round(row.targetLowPsig)+' psig'}</div></div>
+      </div>
+    </div>
+    <div class="reco ${recoClass}">
+      <div style="flex:1;">
+        <div class="rt">${reco.title}</div>
+        <div class="rs">${reco.sub}</div>
+        ${addedEstLine}
+        ${isCheckup && reco.level==='add' ? `
+          <div class="btn-row" style="margin-top:12px;">
+            <button class="btn primary" id="suggestRechargeBtn">Start a recharge session</button>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+    ${!isCheckup && reco.level==='add' ? `
+      <div class="timer">
+        <button class="btn ghost" id="timerBtn">Start 8-min stabilization timer</button>
+        <span class="clock" id="timerClock"></span>
+      </div>
+    ` : ''}
+    ${rateStatusLine}
+
+    <div style="margin-top:20px;padding-top:18px;border-top:1px solid var(--border-soft);">
+      <div class="panel-head" style="margin-bottom:14px;">
+        <div class="panel-title">Condensing performance</div>
+        <span class="tag">Informational — not part of the add/stop call</span>
+      </div>
+      <div class="gauge-row">
+        <div class="gauge-wrap">
+          ${buildSplitGauge(row.condensingSplit)}
+          <div class="gauge-readout">
+            <div class="val" style="color:${splitColor(row.condensingSplit)}">${row.condensingSplit===null?'—':fmt1(row.condensingSplit)}</div>
+            <div class="lbl">Condensing split °F</div>
+            <div class="lbl" style="font-size:9px;margin-top:1px;">(LSAT − ODDB)</div>
+          </div>
+        </div>
+        <div class="readout-grid">
+          <div class="ro"><div class="k">LSAT — Condensing temp</div><div class="v high">${fmt1(row.lsat)}°F</div></div>
+          <div class="ro"><div class="k">LLT — Liquid line temp</div><div class="v">${fmt1(row.liquidTemp)}°F</div></div>
+          <div class="ro"><div class="k">SC — Subcooling</div><div class="v">${row.subcooling===null?'—':fmt1(row.subcooling)+'°F'}</div></div>
+          <div class="ro"><div class="k">HIGH — High-side pressure</div><div class="v high">${fmt1(row.highPsig)} psig</div></div>
+          <div class="ro"><div class="k">ODDB — Outdoor dry-bulb</div><div class="v">${fmt1(row.outdoorDB)}°F</div></div>
+        </div>
+      </div>
+      <div class="status-line">Rough bands for an air-cooled R-22 condenser: 20–35°F split is normal, 15–20 / 35–45°F worth a look, outside that worth investigating (coil, airflow, charge). Your unit's actual design split may differ.</div>
+    </div>
+  `;
+  const timerBtn = document.getElementById('timerBtn');
+  if(timerBtn) timerBtn.onclick = () => startTimer(8*60);
+  const suggestRechargeBtn = document.getElementById('suggestRechargeBtn');
+  if(suggestRechargeBtn) suggestRechargeBtn.onclick = onSuggestRechargeFromCheckup;
+  renderTimer();
+}
+
+async function onSuggestRechargeFromCheckup(){
+  if(!active || active.type !== 'checkup') return;
+  const rows = resolveFields(active.baseline, active.steps);
+  const last = rows[rows.length-1];
+  baselinePrefill = { outdoorDB: last.outdoorDB, indoorWB: last.indoorWB };
+  pendingSessionType = 'recharge';
+  await onArchiveSession();
+  const anchor = document.getElementById('typeRechargeBtn') || document.getElementById('bw');
+  if(anchor) anchor.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function startTimer(seconds){
+  timerEndsAt = Date.now() + seconds*1000;
+  if(timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(renderTimer, 1000);
+  renderTimer();
+}
+function clearTimer(){
+  timerEndsAt = null;
+  if(timerInterval){ clearInterval(timerInterval); timerInterval=null; }
+}
+function renderTimer(){
+  const clockEl = document.getElementById('timerClock');
+  if(!clockEl) return;
+  if(!timerEndsAt){ clockEl.textContent=''; return; }
+  const remain = Math.max(0, Math.round((timerEndsAt-Date.now())/1000));
+  const m = Math.floor(remain/60), s = remain%60;
+  clockEl.textContent = `${m}:${s.toString().padStart(2,'0')}`;
+  clockEl.className = 'clock' + (remain===0 ? ' done' : '');
+  if(remain===0 && timerInterval){ clearInterval(timerInterval); timerInterval=null; clockEl.textContent='Ready to remeasure'; }
+}
+
+function renderLogTable(rows){
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>#</th><th>Low</th><th>Deviation</th><th>VSAT</th><th>SLT</th><th>SH</th><th>TSH</th>
+          <th>High</th><th>Split</th><th>LSAT</th><th>LLT</th><th>SC</th><th>ODDB</th>
+          <th>Weight</th><th>Added</th><th>Total</th><th>Notes</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr>
+            <td>${r.isBaseline ? 'Base' : (r.ambientOnly ? `${r.idx}·recheck` : r.idx)}</td>
+            <td style="color:var(--low)">${fmt1(r.lowPsig)}</td>
+            <td class="${r.shError===null?'':(Math.abs(r.shError)<=3?'err-ok':(r.shError>0?'err-pos':'err-neg'))}">${r.shError===null?'—':(r.shError>0?'+':'')+fmt1(r.shError)}</td>
+            <td>${fmt1(r.vsat)}°F</td>
+            <td>${fmt1(r.suctionTemp)}°F</td>
+            <td>${fmt1(r.actualSH)}°F</td>
+            <td>${fmt1(r.targetSH)}°F</td>
+            <td style="color:var(--high)">${fmt1(r.highPsig)}</td>
+            <td style="color:${splitColor(r.condensingSplit)}">${r.condensingSplit===null?'—':fmt1(r.condensingSplit)+'°F'}</td>
+            <td>${fmt1(r.lsat)}°F</td>
+            <td>${fmt1(r.liquidTemp)}°F</td>
+            <td>${r.subcooling===null?'—':fmt1(r.subcooling)+'°F'}</td>
+            <td>${fmt1(r.outdoorDB)}°F</td>
+            <td>${fmt2(r.weight)} lb</td>
+            <td>${r.isBaseline || r.ambientOnly ? '—' : lbOnly(r.stepOz)}</td>
+            <td>${lbOnly(r.totalOz)}</td>
+            <td style="white-space:normal;min-width:120px;">${r.notes||''}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderChartsPanel(){
+  const el = document.getElementById('chartsPanel');
+  if(!active){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const rows = resolveFields(active.baseline, active.steps);
+
+  if(rows.length < 2){
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">Charging trend</div>
+        <span class="tag">Needs 2+ readings</span>
+      </div>
+      <div class="chart-empty">Log at least one step after the baseline to start plotting the trend.</div>
+    `;
+    return;
+  }
+
+  const devChart = chartWithAxisLabels(buildDeviationChart(rows), 'Reading #', 'SH deviation (°F)');
+  const shTshChart = chartWithAxisLabels(buildShTshChart(rows), 'Reading #', 'Superheat (°F)');
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Charging trend</div>
+      <span class="tag">vs. reading #</span>
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">SH deviation</div>
+      <div class="chart-sub">Should trend toward 0 (green band) as refrigerant is added.</div>
+      ${devChart || '<div class="chart-empty">Not enough data yet.</div>'}
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Actual SH vs Target SH</div>
+      <div class="chart-sub">Watch SH converge toward TSH — if TSH itself is moving, conditions shifted mid-job.</div>
+      ${shTshChart || '<div class="chart-empty">Not enough data yet.</div>'}
+      <div class="chart-legend">
+        <div class="legend-item"><span class="legend-swatch" style="background:var(--low)"></span>SH — Actual superheat</div>
+        <div class="legend-item"><span class="legend-swatch dashed"></span>TSH — Target superheat</div>
+      </div>
+    </div>
+  `;
+}
+
+let editingRowIdx = null;
+
+function renderHistoryPanel(){
+  const el = document.getElementById('historyPanel');
+  if(!active){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const rows = resolveFields(active.baseline, active.steps);
+  const isCheckup = active.type === 'checkup';
+  const measuredTotal = sessionMeasuredTotalOz(active);
+  const weightSummary = !isCheckup ? `
+    <div class="status-line">
+      Starting weight ${fmt2(active.baseline.jugWeight)} lb
+      ${active.finalWeight!=null ? ` · Final weight ${fmt2(active.finalWeight)} lb · Total added ${lbOz(measuredTotal)}` : ' · Final weight not yet recorded'}
+    </div>
+  ` : '';
+
+  if(editingRowIdx!==null && !rows.find(r => r.idx===editingRowIdx)) editingRowIdx = null;
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Session log</div>
+      <span class="tag">${rows.length} reading${rows.length===1?'':'s'}</span>
+    </div>
+    ${renderLogTable(rows)}
+    ${weightSummary}
+    <div class="ambient-form">
+      <div class="field-grid">
+        <div class="field">
+          <label>Found an error in a past reading?</label>
+          <select id="editRowSelect">
+            <option value="">Select a reading to fix…</option>
+            ${rows.map(r => `<option value="${r.idx}" ${editingRowIdx===r.idx?'selected':''}>${r.isBaseline ? 'Base' : (r.ambientOnly ? `${r.idx} · recheck` : `Step ${r.idx}`)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      ${editingRowIdx!==null ? renderEditRowForm(editingRowIdx) : ''}
+    </div>
+  `;
+  document.getElementById('editRowSelect').onchange = (e) => {
+    editingRowIdx = e.target.value==='' ? null : Number(e.target.value);
+    renderHistoryPanel();
+  };
+  wireEditRowForm();
+}
+
+// Builds the inline edit form for one row (idx===0 is baseline, otherwise
+// active.steps[idx-1]) — lets any past reading be corrected or removed,
+// not just the most recent one via Undo.
+function renderEditRowForm(rowIdx){
+  const isBaseline = rowIdx===0;
+  const target = isBaseline ? active.baseline : active.steps[rowIdx-1];
+  if(!target) return '';
+  const weightVal = isBaseline ? target.chargeWeight : target.jugWeight;
+  const rawVal = v => (v!==undefined && v!==null) ? v : '';
+  return `
+    <div class="field-grid" style="margin-top:12px;">
+      ${fieldNumber('erowLow','Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig',value:rawVal(target.lowPsig)})}
+      ${fieldNumber('erowHigh','High-side pressure',{required:true,tone:'high',step:'1',placeholder:'psig',value:rawVal(target.highPsig)})}
+      ${fieldNumber('erowSlt','Suction line temp (SLT)',{required:true,step:'0.1',placeholder:'°F',value:rawVal(target.suctionTemp)})}
+      ${fieldNumber('erowLlt','Liquid line temp (LLT)',{step:'0.1',placeholder:'°F',optLabel:'optional',value:rawVal(target.liquidTemp)})}
+    </div>
+    <div class="field" style="margin-top:12px;">
+      <label>Weight<span class="opt">optional</span></label>
+      <input type="number" inputmode="decimal" step="0.01" id="erowWeight" placeholder="lb" value="${rawVal(weightVal)}">
+      <div class="field-note" style="margin-top:6px;">enter 0 if you Tared a mid-charge scale here (readings from then on are read as running totals), or the actual jug+hoses weight otherwise.${isBaseline ? ' As the first weight in the session, this one also decides which of those two ways every later step\u2019s weight gets read.' : ''}</div>
+    </div>
+    <details class="more" style="margin-top:12px;">
+      <summary>Other readings</summary>
+      <div class="field-grid">
+        ${fieldNumber('erowOdb','Outdoor dry-bulb (ODDB)',{step:'0.1',placeholder:'°F',value:rawVal(target.outdoorDB)})}
+        ${fieldNumber('erowIwb','Indoor wet-bulb (IDWB)',{step:'0.1',placeholder:'°F',value:rawVal(target.indoorWB)})}
+      </div>
+      ${wbHelperBlock('erow','erowIwb')}
+      <div class="field" style="margin-top:12px;">
+        <label>Notes<span class="opt">optional</span></label>
+        <input type="text" id="erowNotes" value="${(target.notes||'').replace(/"/g,'&quot;')}">
+      </div>
+    </details>
+    <div class="btn-row">
+      <button class="btn primary" id="saveEditRowBtn">Save changes</button>
+      ${!isBaseline ? `<button class="btn danger" id="deleteEditRowBtn">Delete this reading</button>` : ''}
+      <button class="btn ghost" id="cancelEditRowBtn">Cancel</button>
+    </div>
+    <div id="editRowErr" class="warn-line" style="display:none;"></div>
+  `;
+}
+
+function wireEditRowForm(){
+  const saveBtn = document.getElementById('saveEditRowBtn');
+  const delBtn = document.getElementById('deleteEditRowBtn');
+  const cancelBtn = document.getElementById('cancelEditRowBtn');
+  if(!saveBtn) return;
+  wireWbHelpers(document.getElementById('historyPanel'));
+  saveBtn.onclick = onSaveEditRow;
+  if(delBtn) delBtn.onclick = onDeleteEditRow;
+  cancelBtn.onclick = () => { editingRowIdx = null; renderHistoryPanel(); };
+}
+
+function onSaveEditRow(){
+  const rowIdx = editingRowIdx;
+  const isBaseline = rowIdx===0;
+  const target = isBaseline ? active.baseline : active.steps[rowIdx-1];
+  const errEl = document.getElementById('editRowErr');
+  for(const id of ['erowLow','erowHigh','erowSlt']){
+    if(document.getElementById(id).value===''){
+      errEl.textContent = 'Low/high pressure and suction temp are required.';
+      errEl.style.display = 'block';
+      return;
+    }
+  }
+  target.lowPsig = Number(document.getElementById('erowLow').value);
+  target.highPsig = Number(document.getElementById('erowHigh').value);
+  target.suctionTemp = Number(document.getElementById('erowSlt').value);
+  target.liquidTemp = document.getElementById('erowLlt').value;
+  target.outdoorDB = document.getElementById('erowOdb').value;
+  target.indoorWB = document.getElementById('erowIwb').value;
+  target.indoorDB = document.getElementById('erowiddb').value;
+  target.indoorRH = document.getElementById('erowrh').value;
+  target.notes = document.getElementById('erowNotes').value;
+  const weightVal = document.getElementById('erowWeight').value;
+  if(isBaseline){
+    target.chargeWeight = weightVal==='' ? undefined : Number(weightVal);
+  } else {
+    target.jugWeight = weightVal==='' ? undefined : Number(weightVal);
+  }
+  editingRowIdx = null;
+  saveActive();
+  renderAll();
+}
+
+async function onDeleteEditRow(){
+  const rowIdx = editingRowIdx;
+  if(rowIdx===0) return; // baseline can't be deleted while a session is active
+  const ok = await showConfirmModal('Delete this reading from the session log? This can\'t be undone.');
+  if(!ok) return;
+  active.steps.splice(rowIdx-1, 1);
+  editingRowIdx = null;
+  saveActive();
+  clearTimer();
+  renderAll();
+}
+
+let expandedArchiveIdx = null;
+
+function renderArchivePanel(){
+  const el = document.getElementById('archivePanel');
+  if(archive.length===0){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const busy = !!active;
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Past sessions</div>
+      <span class="tag">${archive.length}</span>
+    </div>
+    ${busy ? `<div class="status-line" style="margin-bottom:6px;">Close your current session to resume or duplicate one of these.</div>` : ''}
+    ${archive.map((s,i) => {
+      const rows = resolveFields(s.baseline, s.steps);
+      const isOpen = expandedArchiveIdx === i;
+      const isCheckup = s.type === 'checkup';
+      return `
+      <div class="archived-item" style="flex-direction:column;align-items:stretch;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div class="meta">
+            <span class="tag ${isCheckup?'':'low'}" style="margin-right:6px;">${isCheckup?'Checkup':'Recharge'}</span>
+            <b>${new Date(s.id).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'})}</b>
+            — ${s.summary.stepCount} ${isCheckup?'readings':'steps'}${isCheckup?'':`, ${lbOnly(s.summary.totalOz)} added`},
+            final deviation ${s.summary.finalError===null?'—':(s.summary.finalError>0?'+':'')+fmt1(s.summary.finalError)+'°F'}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn ghost" data-view="${i}" style="font-size:12px;padding:6px 12px;">${isOpen ? 'Hide log' : 'View log'}</button>
+            <button class="btn ghost" data-resume="${i}" ${busy?'disabled title="Close current session first"':''} style="font-size:12px;padding:6px 12px;">Resume</button>
+            <button class="btn danger" data-del="${i}" style="font-size:12px;padding:6px 12px;">Delete</button>
+          </div>
+        </div>
+        ${isOpen ? renderLogTable(rows) : ''}
+      </div>
+    `;}).join('')}
+  `;
+  el.querySelectorAll('[data-view]').forEach(btn => {
+    btn.onclick = () => {
+      const i = Number(btn.dataset.view);
+      expandedArchiveIdx = expandedArchiveIdx === i ? null : i;
+      renderArchivePanel();
+    };
+  });
+  el.querySelectorAll('[data-resume]').forEach(btn => {
+    btn.onclick = () => onResumeSession(Number(btn.dataset.resume));
+  });
+  el.querySelectorAll('[data-del]').forEach(btn => {
+    btn.onclick = async () => {
+      archive.splice(Number(btn.dataset.del),1);
+      if(expandedArchiveIdx !== null) expandedArchiveIdx = null;
+      await saveArchive();
+      renderAll();
+    };
+  });
+}
+
+function renderSiteTrendPanel(){
+  const el = document.getElementById('siteTrendPanel');
+  const site = currentSite();
+  if(!site || (site.archive || []).length===0){ el.style.display='none'; return; }
+  el.style.display = 'block';
+
+  const rateChart = chartWithAxisLabels(buildLeakRateTrendChart(site), '', 'Lb lost/month');
+  const devChart = chartWithAxisLabels(buildDeviationTrendChart(site), '', 'SH deviation (°F)');
+  const forecast = computeLeakForecast(site);
+  const rechargeCount = (site.archive||[]).filter(s=>s.type!=='checkup').length;
+
+  let forecastHtml = '';
+  if(forecast.possible){
+    const floorNote = forecast.singleRechargeFloor
+      ? ` This is based on a single recharge with no prior "full charge" date on record, so it assumes that recharge covered at least the last 30 days of loss — the real rate could be lower if the leak has actually been going on longer.`
+      : ` The earliest recharge on record uses that same 30-day floor assumption since there's no prior "full charge" date for it; later recharges use the actual measured interval.`;
+    forecastHtml = `
+      <div class="reco add" style="margin-top:6px;">
+        <div style="flex:1;">
+          <div class="rt">Rough estimate: next recharge around ${forecast.projectedDate.toLocaleDateString([], {month:'long',day:'numeric',year:'numeric'})}</div>
+          <div class="rs">Based on ~${lbOnly(forecast.ozPerMonth)}/month lost across ${forecast.basedOnIntervals} recharge${forecast.basedOnIntervals===1?'':'s'} on record, and this site's typical recharge size of ~${lbOnly(forecast.typicalTriggerOz)}. It's been ${Math.round(forecast.daysSinceLast)} days since the last recharge, so roughly ${lbOnly(forecast.currentDeficitEstimate)} has likely leaked back out already.${floorNote}</div>
+        </div>
+      </div>
+    `;
+  } else {
+    forecastHtml = `<div class="chart-empty">${forecast.reason}</div>`;
+  }
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Site trend</div>
+      <span class="tag">${rechargeCount} recharge${rechargeCount===1?'':'s'} on record</span>
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Lb lost per month, over time</div>
+      <div class="chart-sub">Flat or falling is a stable system. Rising suggests the leak is getting worse. The earliest point is a conservative floor (see note below), not a direct measurement.</div>
+      ${rateChart || '<div class="chart-empty">No completed recharges yet.</div>'}
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">As-found SH deviation at the start of each visit</div>
+      <div class="chart-sub">How far off target the system was found before any work — a rising trend visit-to-visit tells the same story as the chart above.</div>
+      ${devChart || '<div class="chart-empty">No sessions yet.</div>'}
+    </div>
+    <div class="chart-block" style="margin-bottom:0;">
+      <div class="chart-title">Time-to-next-recharge estimate</div>
+      ${forecastHtml}
+      <div class="status-line">Rough projection only — assumes each recharge fully corrected the system to target, and that the leak rate stays constant. Treat as a planning guide, not a guarantee.</div>
+    </div>
+  `;
+}
+
+async function onResumeSession(i){
+  if(active) return;
+  editingRowIdx = null;
+  const session = archive[i];
+  active = { createdAt: session.id, type: session.type || 'recharge', baseline: session.baseline, steps: session.steps };
+  archive.splice(i,1);
+  expandedArchiveIdx = null;
+  await saveActive();
+  await saveArchive();
+  renderAll();
+}
+
+function renderAll(){
+  renderSitePanel();
+  renderSiteEditForm();
+  renderBaselinePanel();
+  renderAmbientPanel();
+  renderStepPanel();
+  renderResultsPanel();
+  renderChartsPanel();
+  renderHistoryPanel();
+  renderArchivePanel();
+  renderSiteTrendPanel();
+  wireBackupButtons();
+}
+
+async function downloadJson(payload, filename){
+  let text;
+  try{
+    text = JSON.stringify(payload, null, 2);
+  }catch(e){
+    await showAlertModal('Could not prepare that file for export.');
+    return;
+  }
+
+  // The iOS-embedded case (Claude's iPhone/iPad app) is where window.open,
+  // a plain <a> click, and quite possibly navigator.share all get
+  // intercepted asynchronously and go nowhere, surfacing only as an
+  // uncaught "Script error." with no useful detail. That's specific to
+  // that embedding, not to running inside an iframe in general — Claude
+  // Desktop and the browser also render this inside a frame, but their
+  // download handling works fine, so gating on "any iframe" (as an
+  // earlier version did) incorrectly broke Export there too. Detect iOS
+  // specifically instead, and only skip straight to the guaranteed
+  // manual-copy fallback there.
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPadOS reporting as Mac
+
+  if(isIOS){
+    showJsonFallbackModal(text);
+    return;
+  }
+
+  // 1) Web Share API — works in some browsers/desktop apps too.
+  try{
+    const file = new File([text], filename, {type:'application/json'});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:filename});
+      return;
+    }
+  }catch(e){
+    // user cancelled the share sheet, or share isn't actually usable here —
+    // fall through and try the next technique.
+  }
+
+  // 2) Classic anchor-click download — the normal, reliable path in
+  // Claude Desktop and the browser.
+  try{
+    const blob = new Blob([text], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }catch(e){
+    // Last resort for any other environment where the above didn't work.
+    showJsonFallbackModal(text);
+  }
+}
+
+function showJsonFallbackModal(text){
+  const overlay = document.getElementById('jsonModalOverlay');
+  const textarea = document.getElementById('jsonModalText');
+  const copyBtn = document.getElementById('jsonModalCopyBtn');
+  const closeBtn = document.getElementById('jsonModalCloseBtn');
+  textarea.value = text;
+  overlay.style.display = 'flex';
+  const resetCopyLabel = () => { copyBtn.textContent = 'Copy to clipboard'; };
+  copyBtn.onclick = async () => {
+    let copied = false;
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      }
+    }catch(e){ /* fall through to the manual-select method below */ }
+    if(!copied){
+      try{
+        textarea.focus();
+        textarea.select();
+        copied = document.execCommand('copy');
+      }catch(e){ copied = false; }
+    }
+    copyBtn.textContent = copied ? 'Copied!' : 'Select the text above and copy it manually';
+    setTimeout(resetCopyLabel, 2000);
+  };
+  closeBtn.onclick = () => { overlay.style.display = 'none'; };
+}
+
+/* ---- Whole-dataset backup/restore (all sites) ---- */
+async function backupAllSites(){
+  const payload = { exportedAt: new Date().toISOString(), sites, currentSiteId };
+  const stamp = new Date().toISOString().slice(0,10);
+  await downloadJson(payload, `backup-${stamp}.json`);
+}
+
+function restoreAllSites(file){
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try{
+      const data = JSON.parse(e.target.result);
+      if(data.sites){
+        sites = data.sites;
+        currentSiteId = data.currentSiteId && sites.find(s=>s.id===data.currentSiteId) ? data.currentSiteId : (sites[0]?sites[0].id:null);
+      } else if(data.site){
+        // a single-site export file used with "Restore" — treat as one site
+        sites = [data.site];
+        currentSiteId = data.site.id;
+      } else if(data.active !== undefined || data.archive !== undefined){
+        // legacy single-session backup file — wrap into a site
+        const site = { id:newSiteId(), name:'Imported system', refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz:'', tons:'', createdAt:Date.now(), active:data.active||null, archive:data.archive||[] };
+        sites = [site];
+        currentSiteId = site.id;
+      } else {
+        throw new Error('unrecognized format');
+      }
+      syncActiveArchiveFromSite();
+      await saveSites();
+      clearTimer();
+      expandedArchiveIdx = null;
+      siteFormMode = null;
+      renderAll();
+    }catch(err){
+      await showAlertModal('Could not read that file — make sure it\'s a backup exported from this tool.');
+    }
+  };
+  reader.readAsText(file);
+}
+
+/* ---- Per-site export/import ---- */
+async function exportSite(){
+  const site = currentSite();
+  if(!site) return;
+  const payload = { exportedAt: new Date().toISOString(), site };
+  const stamp = new Date().toISOString().slice(0,10);
+  const safeName = site.name.replace(/[^a-z0-9]+/gi,'-').toLowerCase().replace(/^-+|-+$/g,'') || 'site';
+  await downloadJson(payload, `${safeName}-${stamp}.json`);
+}
+
+function importSiteFile(file){
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try{
+      const data = JSON.parse(e.target.result);
+      let incoming = null;
+      if(data.site) incoming = data.site;
+      else if(data.sites && data.sites.length===1) incoming = data.sites[0];
+      else if(data.sites && data.sites.length>1){ await showAlertModal('That file has multiple sites — use Restore in the Backup section at the bottom instead.'); return; }
+      else throw new Error('unrecognized format');
+
+      const existingIdx = sites.findIndex(s => s.id === incoming.id);
+      if(existingIdx>=0){
+        const overwrite = await showConfirmModal(`"${incoming.name}" already exists here — overwrite it with the imported version?`);
+        if(!overwrite) return;
+        sites[existingIdx] = incoming;
+      } else {
+        sites.push(incoming);
+      }
+      currentSiteId = incoming.id;
+      syncActiveArchiveFromSite();
+      await saveSites();
+      clearTimer();
+      expandedArchiveIdx = null;
+      siteFormMode = null;
+      renderAll();
+    }catch(err){
+      await showAlertModal('Could not read that file — make sure it\'s a site export from this tool.');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function wireBackupButtons(){
+  const backupBtn = document.getElementById('backupBtn');
+  const restoreTriggerBtn = document.getElementById('restoreTriggerBtn');
+  const restoreFile = document.getElementById('restoreFile');
+  if(backupBtn) backupBtn.onclick = backupAllSites;
+  if(restoreTriggerBtn) restoreTriggerBtn.onclick = () => restoreFile.click();
+  if(restoreFile) restoreFile.onchange = async () => {
+    if(restoreFile.files && restoreFile.files[0]){
+      const file = restoreFile.files[0];
+      restoreFile.value = '';
+      const ok = await showConfirmModal('This replaces every site currently stored in this tool with the backup file. Continue?');
+      if(ok) restoreAllSites(file);
+    }
+  };
+}
+
+(async function init(){
+  const dismissBtn = document.getElementById('storageBannerDismiss');
+  if(dismissBtn) dismissBtn.onclick = () => { document.getElementById('storageBanner').style.display = 'none'; };
+  await probeStorage();
+  await loadState();
+  renderAll();
+})();
+</script>
+</body>
+</html>
