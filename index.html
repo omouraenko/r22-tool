@@ -917,7 +917,8 @@ function resolveFields(baseline, steps, opts={}){
   // returns array of resolved rows aligned with steps (index 0 = baseline)
   const rows = [];
   let prevOutdoorDB = baseline.outdoorDB,
-      prevIndoorWB = baseline.indoorWB, prevLiquid = baseline.liquidTemp;
+      prevIndoorWB = baseline.indoorWB, prevLiquid = baseline.liquidTemp,
+      prevIndoorDB = baseline.indoorDB, prevIndoorRH = baseline.indoorRH;
 
   const all = [{...baseline, isBaseline:true}, ...steps];
   let prevWeight = null, prevActualSH = null, prevTotalOz = 0;
@@ -947,7 +948,10 @@ function resolveFields(baseline, steps, opts={}){
     const outdoorDB = (s.outdoorDB!==undefined && s.outdoorDB!=='') ? Number(s.outdoorDB) : prevOutdoorDB;
     const indoorWB  = (s.indoorWB!==undefined && s.indoorWB!=='')  ? Number(s.indoorWB)  : prevIndoorWB;
     const liquidTemp = (s.liquidTemp!==undefined && s.liquidTemp!=='') ? Number(s.liquidTemp) : prevLiquid;
+    const indoorDB  = (s.indoorDB!==undefined && s.indoorDB!=='')  ? Number(s.indoorDB)  : prevIndoorDB;
+    const indoorRH  = (s.indoorRH!==undefined && s.indoorRH!=='')  ? Number(s.indoorRH)  : prevIndoorRH;
     prevOutdoorDB = outdoorDB; prevIndoorWB = indoorWB; prevLiquid = liquidTemp;
+    prevIndoorDB = indoorDB; prevIndoorRH = indoorRH;
 
     // Baseline's own "weight" on this jug(+hoses) chain is the optional
     // baseWeight reading, if one was taken — never the required
@@ -1079,7 +1083,7 @@ function resolveFields(baseline, steps, opts={}){
       // Baseline's weight is only shown here if an optional jug+hoses
       // baseWeight reading was taken — never the required jug-only
       // Starting weight, which is a different measurement basis.
-      weight, outdoorDB, indoorWB, liquidTemp,
+      weight, outdoorDB, indoorWB, liquidTemp, indoorDB, indoorRH,
       lowPsig, highPsig, suctionTemp,
       vsat, lsat, actualSH, targetSH, shError, condensingSplit, subcooling,
       targetVSAT, targetLowPsig, targetLowPsigSource,
@@ -1422,7 +1426,8 @@ function collectDeviationTrendBySite(site){
     .map(s => {
       const rows = resolveFields(s.baseline, s.steps, {sltCap: currentSltCap()});
       const baseline = rows[0];
-      return { x: s.closedAt || s.id, y: baseline.shError, type: s.type || 'recharge' };
+      const final = rows[rows.length-1];
+      return { x: s.closedAt || s.id, y: baseline.shError, yFinal: final.shError, hasFinal: rows.length>1, type: s.type || 'recharge' };
     })
     .filter(p => p.y!==null && !isNaN(p.x))
     .sort((a,b) => a.x-b.x);
@@ -1467,10 +1472,14 @@ function buildLeakRateTrendChart(site, xDomain){
 function buildDeviationTrendChart(site, xDomain){
   const points = collectDeviationTrendBySite(site);
   if(points.length===0) return null;
-  const yMax = Math.max(...points.map(p=>p.y)) + 10;
+  const asFoundPoints = points.map(p => ({x:p.x, y:p.y}));
+  const postChargePoints = points.filter(p => p.hasFinal && p.yFinal!==null).map(p => ({x:p.x, y:p.yFinal}));
+  const yMax = Math.max(...asFoundPoints.map(p=>p.y), ...postChargePoints.map(p=>p.y)) + 10;
   const yMin = -15;
+  const series = [{label:'as-found', color:'var(--text)', points:asFoundPoints, noLine:true}];
+  if(postChargePoints.length) series.push({label:'post charge', color:'var(--amber)', points:postChargePoints, noLine:true});
   return buildLineChart(
-    [{label:'as-found SH deviation', color:'var(--text)', points, noLine:true}],
+    series,
     { zeroLine:true, xLabelFn: dateLabelFn, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max, yMin, yMax,
       yZones:[
         [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
@@ -1559,8 +1568,8 @@ function wbHelperBlock(prefix, idwbFieldId, opts={}){
   return `
     <div class="wb-helper" data-prefix="${prefix}">
       <div class="field-grid"${gridStyle}>
-        ${fieldNumber(prefix+'iddb',iddbLabel,{step:'0.1',placeholder:'°F, optional'})}
-        ${fieldNumber(prefix+'rh',rhLabel,{step:'1',placeholder:'%, optional'})}
+        ${fieldNumber(prefix+'iddb',iddbLabel,{step:'0.1',placeholder:opts.iddbPlaceholder||'°F, optional',value:opts.iddbValue})}
+        ${fieldNumber(prefix+'rh',rhLabel,{step:'1',placeholder:opts.rhPlaceholder||'%, optional',value:opts.rhValue})}
       </div>
       <div class="btn-row" style="margin-top:12px;">
         <button type="button" class="btn ghost" data-calcwb-target="${idwbFieldId}" data-iddb="${prefix}iddb" data-rh="${prefix}rh">Calculate IDWB</button>
@@ -2097,7 +2106,7 @@ function renderAmbientPanel(){
           ${fieldNumber('aiwb','Indoor wet-bulb (IDWB)',{step:'0.1',value:numOrEmpty(last.indoorWB)})}
           ${fieldNumber('aliquid','Liquid line temp (LLT)',{step:'0.1',value:numOrEmpty(last.liquidTemp)})}
         </div>
-        ${wbHelperBlock('a','aiwb')}
+        ${wbHelperBlock('a','aiwb',{iddbValue:numOrEmpty(last.indoorDB),rhValue:numOrEmpty(last.indoorRH)})}
         <div class="btn-row">
           <button class="btn primary" id="ambientSaveBtn">Save updated conditions</button>
         </div>
@@ -2166,7 +2175,7 @@ function renderStepPanel(){
         ${fieldNumber('sodb','Outdoor dry-bulb (ODDB)',{step:'0.1',placeholder:`${fmt1(last.outdoorDB)}`})}
         ${fieldNumber('siwb','Indoor wet-bulb (IDWB)',{step:'0.1',placeholder:`${fmt1(last.indoorWB)}`})}
       </div>
-      ${wbHelperBlock('s','siwb')}
+      ${wbHelperBlock('s','siwb',{iddbPlaceholder:fmt1(last.indoorDB),rhPlaceholder:fmt1(last.indoorRH)})}
       <div class="field" style="margin-top:12px;">
         <label>Notes<span class="opt">optional</span></label>
         <input type="text" id="snotes" placeholder="anything worth remembering about this step">
@@ -2375,7 +2384,7 @@ function renderLogTable(rows){
       <table>
         <thead><tr>
           <th>#</th><th>Low</th><th>Deviation</th><th>VSAT</th><th>SLT</th><th>SH</th><th>TSH</th>
-          <th>High</th><th>Split</th><th>LSAT</th><th>LLT</th><th>SC</th><th>ODDB</th>
+          <th>High</th><th>Split</th><th>LSAT</th><th>LLT</th><th>SC</th><th>ODDB</th><th>IDWB</th>
           <th>Weight</th><th>Added</th><th>Total</th><th>Notes</th>
         </tr></thead>
         <tbody>
@@ -2393,6 +2402,7 @@ function renderLogTable(rows){
             <td>${fmt1(r.liquidTemp)}°F</td>
             <td>${r.subcooling===null?'—':fmt1(r.subcooling)+'°F'}</td>
             <td>${fmt1(r.outdoorDB)}°F</td>
+            <td>${fmt1(r.indoorWB)}°F</td>
             <td>${isNaN(r.weight) ? '—' : fmt2(r.weight)+' lb'}</td>
             <td>${r.isBaseline || r.ambientOnly ? '—' : lbOnly(r.stepOz)}</td>
             <td>${lbOnlyOrDash(r.totalOz)}</td>
@@ -2515,7 +2525,7 @@ function renderEditRowForm(rowIdx){
         ${fieldNumber('erowOdb','Outdoor dry-bulb (ODDB)',{step:'0.1',placeholder:'°F',value:rawVal(target.outdoorDB)})}
         ${fieldNumber('erowIwb','Indoor wet-bulb (IDWB)',{step:'0.1',placeholder:'°F',value:rawVal(target.indoorWB)})}
       </div>
-      ${wbHelperBlock('erow','erowIwb')}
+      ${wbHelperBlock('erow','erowIwb',{iddbValue:rawVal(target.indoorDB),rhValue:rawVal(target.indoorRH)})}
       <div class="field" style="margin-top:12px;">
         <label>Notes<span class="opt">optional</span></label>
         <input type="text" id="erowNotes" value="${(target.notes||'').replace(/"/g,'&quot;')}">
@@ -2726,8 +2736,12 @@ function renderSiteTrendPanel(){
       ${rateChart || '<div class="chart-empty">No completed recharges yet.</div>'}
     </div>
     <div class="chart-block">
-      <div class="chart-title">As-found SH deviation at the start of each visit</div>
+      <div class="chart-title">As-found SH deviation</div>
       <div class="chart-sub">How far off target the system was found before any work — a rising trend visit-to-visit tells the same story as the chart above.</div>
+      <div class="chart-legend">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--text)"></span>As-found</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--amber)"></span>Post charge</span>
+      </div>
       ${devChart || '<div class="chart-empty">No sessions yet.</div>'}
     </div>
     <div class="chart-block" style="margin-bottom:0;">
