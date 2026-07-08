@@ -189,8 +189,11 @@
     display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
   }
   .archived-item:last-child{border-bottom:none;}
-  .archived-item .meta{font-size:12.5px;color:var(--text-dim);}
+  .archived-item .meta{font-size:12.5px;color:var(--text-dim);line-height:1.8;}
   .archived-item .meta b{color:var(--text);}
+  .archived-item.selected{background:var(--amber-dim);border-radius:8px;padding-left:10px;padding-right:10px;margin:0 -10px;}
+  .archived-item.selectable{cursor:pointer;}
+  .archived-item.selectable:active{filter:brightness(1.15);}
 
   .warn-line{font-size:12px;color:var(--high);margin-top:8px;font-family:'IBM Plex Mono',monospace;}
   .status-line{font-size:12px;color:var(--text-faint);margin-top:10px;font-family:'IBM Plex Mono',monospace;}
@@ -340,7 +343,7 @@
       <span class="tag">All sites · local file</span>
     </div>
     <div class="backup-row">
-      <button class="btn ghost" id="backupBtn">Backup (.json)</button>
+      <button class="btn ghost" id="backupBtn">Backup</button>
       <button class="btn ghost" id="restoreTriggerBtn">Restore</button>
       <input type="file" id="restoreFile" accept="application/json">
     </div>
@@ -387,6 +390,152 @@ function psigFromSatTemp(tempF){
     if(tempF>=t0 && tempF<=t1){
       return p0 + (tempF-t0)*(p1-p0)/(t1-t0);
     }
+  }
+  return null;
+}
+
+/* =========================================================
+   TLOW modeling — predicting what LOW-side pressure will hit
+   target SH.
+
+   The naive approach (assume SLT stays fixed, solve VSAT from
+   the PT table) only works near target: far from it, SLT
+   itself changes a lot as charge is added, not just VSAT, so
+   holding it fixed badly overshoots. A single straight-line
+   extrapolation of SH-vs-pressure has its own failure mode —
+   the SH-vs-charge relationship isn't linear (it's often much
+   more sensitive near correct charge than far from it), so a
+   secant slope measured from two readings that span into that
+   more-sensitive region can still overshoot.
+
+   Instead, this models the genuinely unknown, system-specific
+   relationship — how SLT itself evolves with LOW pressure —
+   from the session's own observed (LOW, SLT) points, and
+   combines that with the *exact*, table-based VSAT(LOW)
+   relationship (nothing to model there, it's known physics) to
+   solve for the pressure where predicted SLT − VSAT(LOW) =
+   target SH. The model gets richer as more points arrive:
+   one point can only assume a value for SLT, two points can
+   draw a line through them, three or more can fit a curve that
+   captures how the rate itself is changing.
+   ========================================================= */
+
+function fitLinearFn(p1, p2){
+  if(p1.x===p2.x) return null;
+  const a = (p2.y-p1.y)/(p2.x-p1.x);
+  const b = p1.y - a*p1.x;
+  return x => a*x + b;
+}
+
+// Generic Nelder-Mead simplex optimizer — minimizes f(params) with no
+// derivatives needed. Used to fit the atan model below, which has no
+// closed-form solution the way linear/quadratic regression does.
+function nelderMead(f, initialSimplex, maxIter){
+  const n = initialSimplex[0].length;
+  let simplex = initialSimplex.map(p => p.slice());
+  const alpha=1, gamma=2, rho=0.5, sigma=0.5;
+  for(let iter=0; iter<maxIter; iter++){
+    simplex.sort((a,b) => f(a)-f(b));
+    const best = simplex[0], worst = simplex[n], secondWorst = simplex[n-1];
+    const centroid = new Array(n).fill(0);
+    for(let i=0;i<n;i++) for(let j=0;j<n;j++) centroid[j] += simplex[i][j];
+    for(let j=0;j<n;j++) centroid[j] /= n;
+
+    const reflected = centroid.map((c,j) => c + alpha*(c-worst[j]));
+    const fReflected = f(reflected);
+    if(fReflected < f(best)){
+      const expanded = centroid.map((c,j) => c + gamma*(reflected[j]-c));
+      simplex[n] = f(expanded) < fReflected ? expanded : reflected;
+    } else if(fReflected < f(secondWorst)){
+      simplex[n] = reflected;
+    } else {
+      const contracted = centroid.map((c,j) => c + rho*(worst[j]-c));
+      if(f(contracted) < f(worst)){
+        simplex[n] = contracted;
+      } else {
+        for(let i=1;i<=n;i++) simplex[i] = simplex[i].map((v,j) => best[j]+sigma*(v-best[j]));
+      }
+    }
+  }
+  simplex.sort((a,b) => f(a)-f(b));
+  return simplex;
+}
+
+// SLT-vs-LOW model used once 3+ readings exist: SLT(x) = A - k*(atan(m*(x-x0)) + pi/2).
+// Since (atan(...) + pi/2) ranges from 0 to pi and is always >= 0, this
+// curve is monotonically decreasing by construction and flattens at both
+// ends — it physically cannot bow upward between two points the way an
+// unconstrained polynomial can. All four parameters (including the upper
+// plateau A) are fit freely to the session's own observed points via
+// Nelder-Mead: A is NOT tied to the assumed-healthy-SLT cap, because real
+// early-session readings can legitimately run well above that cap (that's
+// what "far from target" means) — forcing the curve to respect the cap
+// would make it unable to fit that real data at all. The cap is applied
+// separately, as a ceiling on the final solved pressure, wherever this
+// model's result is used.
+function fitAtanModel(points){
+  if(new Set(points.map(p=>p.x)).size < 3) return null;
+  const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs), xSpan = (xMax-xMin) || 10;
+  const yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const HALF_PI = Math.PI/2;
+
+  const predict = ([A,k,m,x0], x) => A - k*(Math.atan(m*(x-x0)) + HALF_PI);
+  const cost = ([A,k,m,x0]) => {
+    if(k<=0 || m<=0) return Infinity; // enforce the monotonic-decreasing shape
+    let sse = 0;
+    for(const p of points){ const d = predict([A,k,m,x0], p.x) - p.y; sse += d*d; }
+    return sse;
+  };
+
+  const A0 = yMax; // rough guess: upper plateau near the highest observed SLT
+  const k0 = Math.max(0.5, (yMax-yMin)/Math.PI);
+  const m0 = 4/xSpan;
+  const x0_0 = xs[Math.floor(xs.length/2)];
+  const initialSimplex = [
+    [A0,   k0,     m0,     x0_0],
+    [A0+2, k0,     m0,     x0_0],
+    [A0,   k0*1.4, m0,     x0_0],
+    [A0,   k0,     m0*1.6, x0_0],
+    [A0,   k0,     m0,     x0_0 + xSpan*0.25]
+  ];
+  const result = nelderMead(cost, initialSimplex, 600);
+  const best = result[0];
+  if(!isFinite(cost(best))) return null;
+  return x => predict(best, x);
+}
+
+// Numerically finds the LOW psig where sltModel(psig) - VSAT(psig) equals
+// targetSH. Searches outward from the current reading in the direction
+// implied by its own SH error (more pressure needed if SH is high, less
+// if it's already below target) and returns the *nearest* root in that
+// direction. This matters because a quadratic fit through only three
+// points can be unstable outside the region it was fit on — scanning the
+// full range from zero can find a spurious, physically meaningless root
+// (e.g. a much lower pressure) before reaching the real one; anchoring
+// the search at the current point and walking toward the gap avoids that.
+function solveLowForTargetSH(sltModel, targetSH, currentPsig, searchSpan){
+  const step = 0.5;
+  const f = p => {
+    const vsat = satTempFromPsig(p);
+    if(vsat===null) return null;
+    return sltModel(p) - vsat - targetSH;
+  };
+  const f0 = f(currentPsig);
+  if(f0===null) return null;
+  if(f0===0) return currentPsig;
+  const dir = f0>0 ? 1 : -1; // f0>0: SH too high, need MORE pressure. f0<0: need less.
+  let prevP = currentPsig, prevV = f0;
+  for(let d=step; d<=searchSpan; d+=step){
+    const p = currentPsig + dir*d;
+    if(p<0 || p>400) break;
+    const v = f(p);
+    if(prevV!==null && v!==null && ((prevV<=0 && v>=0) || (prevV>=0 && v<=0))){
+      if(v===prevV) return p;
+      const frac = prevV/(prevV-v);
+      return prevP + frac*(p-prevP);
+    }
+    prevP = p; prevV = v;
   }
   return null;
 }
@@ -525,6 +674,15 @@ async function probeStorage(){
 
 function currentSite(){ return sites.find(s => s.id === currentSiteId) || null; }
 
+// The "assumed max healthy SLT" cap used for the rough first-reading TLOW
+// estimate — a per-site setting (different equipment/climates may
+// legitimately run higher or lower), defaulting to 55°F if the site
+// hasn't customized it.
+function sltCapFor(site){
+  return (site && site.sltCap!==undefined && site.sltCap!=='' && !isNaN(site.sltCap)) ? Number(site.sltCap) : 55;
+}
+function currentSltCap(){ return sltCapFor(currentSite()); }
+
 function newSiteId(){ return 'site_' + Date.now() + '_' + Math.random().toString(36).slice(2,7); }
 
 function syncActiveArchiveFromSite(){
@@ -561,6 +719,7 @@ async function loadState(){
       migrated = true;
     }
   }
+
 
   try{
     const c = await appStorage.get(CURRENT_SITE_KEY);
@@ -602,6 +761,10 @@ const fmt2 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*10
 const fmt3 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*1000)/1000).toFixed(3);
 const lbOz = oz => (oz===null||oz===undefined||isNaN(oz)) ? '—' : `${fmt2(oz/16)} lb (${fmt1(oz)} oz)`;
 const lbOnly = oz => (oz===null||oz===undefined||isNaN(oz)) ? '—' : `${fmt2(oz/16)} lb`;
+// Same as lbOnly, but treats a value that displays as "0.00 lb" the same
+// as unknown — used for the log table's running Total, so it reads the
+// same dash whether nothing's been added yet or nothing was measured.
+const lbOnlyOrDash = oz => { const s = lbOnly(oz); return s === '0.00 lb' ? '—' : s; };
 function lbToLbOz(lb){
   if(lb===null||lb===undefined||isNaN(lb)) return '—';
   const totalOz = lb*16;
@@ -618,7 +781,7 @@ function collectHistoricalRatePoints(site){
   const points = [];
   (site.archive || []).forEach(session => {
     if(session.type === 'checkup') return;
-    const rows = resolveFields(session.baseline, session.steps);
+    const rows = resolveFields(session.baseline, session.steps, {sltCap: sltCapFor(site)});
     rows.forEach(r => {
       if(r.shDropPerOz!==null && !isNaN(r.shDropPerOz) && !isNaN(r.outdoorDB)){
         points.push({x: r.outdoorDB, y: r.shDropPerOz});
@@ -668,7 +831,7 @@ function buildPredictRateForSite(site){
 // a hose attached, so this is the one real measurement we have).
 function sessionMeasuredTotalOz(session){
   if(!session || session.type==='checkup') return null;
-  const start = Number(session.baseline && session.baseline.jugWeight);
+  const start = Number(session.baseline && session.baseline.startWeight);
   const end = Number(session.finalWeight);
   if(isNaN(start) || isNaN(end)) return null;
   return Math.max(0, (start-end)*16);
@@ -682,9 +845,10 @@ function resolveFields(baseline, steps, opts={}){
 
   const all = [{...baseline, isBaseline:true}, ...steps];
   let prevWeight = null, prevActualSH = null, prevTotalOz = 0;
+  let lowSltHistory = []; // {x:lowPsig, y:suctionTemp} from prior valid rows, most recent last
 
   // Auto-detect the per-step weight mode from the FIRST reading on the
-  // jug(+hoses) basis — that's baseline.chargeWeight if it was given
+  // jug(+hoses) basis — that's baseline.baseWeight if it was given
   // (an optional weigh-in taken with hoses attached, right at baseline,
   // separate from the required jug-only Starting weight), otherwise the
   // first step that has a weight. If that first reading is exactly 0,
@@ -695,9 +859,9 @@ function resolveFields(baseline, steps, opts={}){
   // the magnitude — a scale under a losing-weight jug will report that
   // running total as a negative number as the charge is delivered.
   let incrementalWeighMode = false;
-  const firstChainReading = (baseline.chargeWeight!==undefined && baseline.chargeWeight!=='')
-    ? baseline.chargeWeight
-    : (steps.find(s => s.jugWeight!==undefined && s.jugWeight!=='') || {}).jugWeight;
+  const firstChainReading = (baseline.baseWeight!==undefined && baseline.baseWeight!=='')
+    ? baseline.baseWeight
+    : (steps.find(s => s.stepWeight!==undefined && s.stepWeight!=='') || {}).stepWeight;
   if(firstChainReading!==undefined && firstChainReading!==''){
     incrementalWeighMode = Number(firstChainReading) === 0;
   }
@@ -710,11 +874,11 @@ function resolveFields(baseline, steps, opts={}){
     prevOutdoorDB = outdoorDB; prevIndoorWB = indoorWB; prevLiquid = liquidTemp;
 
     // Baseline's own "weight" on this jug(+hoses) chain is the optional
-    // chargeWeight reading, if one was taken — never the required
+    // baseWeight reading, if one was taken — never the required
     // jug-only Starting weight, which isn't on the same basis.
     const weight = idx===0
-      ? (baseline.chargeWeight!==undefined && baseline.chargeWeight!=='' ? Number(baseline.chargeWeight) : NaN)
-      : Number(s.jugWeight);
+      ? (baseline.baseWeight!==undefined && baseline.baseWeight!=='' ? Number(baseline.baseWeight) : NaN)
+      : Number(s.stepWeight);
     const lowPsig = Number(s.lowPsig);
     const highPsig = Number(s.highPsig);
     const suctionTemp = Number(s.suctionTemp); // SLT
@@ -729,12 +893,57 @@ function resolveFields(baseline, steps, opts={}){
     const subcooling = (lsat!==null && !isNaN(liquidTemp)) ? lsat - liquidTemp : null; // SC
 
     const targetVSAT = (targetSH!==null && !isNaN(suctionTemp)) ? suctionTemp - targetSH : null;
-    const targetLowPsig = targetVSAT!==null ? psigFromSatTemp(targetVSAT) : null;
+
+    // TLOW: model how SLT itself evolves with LOW pressure from this
+    // session's own observed points, and combine that with the exact
+    // PT-table VSAT(LOW) relationship — see the fitting helpers above for
+    // the full reasoning. The conservative capped-SLT estimate (assume a
+    // properly-running system's SLT won't realistically run above 55°F)
+    // is always available as a ceiling and is used as-is with only one
+    // point; with two or more points it still bounds the fitted model's
+    // answer from above, as a backstop against an unstable extrapolation
+    // (e.g. a near-flat secant or quadratic through noisy points)
+    // recommending more pressure than that conservative assumption would.
+    let targetLowPsig = null, targetLowPsigSource = null;
+    const currentLowSltPoint = (!isNaN(lowPsig) && !isNaN(suctionTemp)) ? {x:lowPsig, y:suctionTemp} : null;
+    const fitPoints = currentLowSltPoint ? [...lowSltHistory, currentLowSltPoint] : [];
+
+    if(targetSH!==null && currentLowSltPoint){
+      const effectiveCap = opts.sltCap!==undefined ? opts.sltCap : 55;
+      const cappedSuctionTemp = Math.min(suctionTemp, effectiveCap);
+      const ceilingPsig = psigFromSatTemp(cappedSuctionTemp - targetSH);
+
+      if(fitPoints.length>=3){
+        const model = fitAtanModel(fitPoints);
+        const solved = model ? solveLowForTargetSH(model, targetSH, lowPsig, 150) : null;
+        if(solved!==null){
+          targetLowPsig = ceilingPsig!==null ? Math.min(solved, ceilingPsig) : solved;
+          targetLowPsigSource = 'atan';
+        } else {
+          targetLowPsig = ceilingPsig;
+          targetLowPsigSource = 'theoretical';
+        }
+      } else if(fitPoints.length===2){
+        const model = fitLinearFn(fitPoints[0], fitPoints[1]);
+        const solved = model ? solveLowForTargetSH(model, targetSH, lowPsig, 150) : null;
+        if(solved!==null){
+          targetLowPsig = ceilingPsig!==null ? Math.min(solved, ceilingPsig) : solved;
+          targetLowPsigSource = 'linear';
+        } else {
+          targetLowPsig = ceilingPsig;
+          targetLowPsigSource = 'theoretical';
+        }
+      } else {
+        targetLowPsig = ceilingPsig;
+        targetLowPsigSource = 'theoretical';
+      }
+    }
+    if(currentLowSltPoint) lowSltHistory.push(currentLowSltPoint);
 
     let stepOz = null, totalOz;
     if(idx===0){
       totalOz = 0;
-      // If a baseline chargeWeight was given, it seeds the chain: under
+      // If a baseline baseWeight was given, it seeds the chain: under
       // tare/incremental mode it establishes the cumulative-oz reference
       // point; under absolute mode, prevWeight picks it up naturally
       // below, letting step 1 diff against a real prior reading.
@@ -792,18 +1001,18 @@ function resolveFields(baseline, steps, opts={}){
       idx, isBaseline: idx===0, ambientOnly: !!s.ambientOnly, ambientProvided,
       timestamp: s.timestamp || null,
       // Baseline's weight is only shown here if an optional jug+hoses
-      // chargeWeight reading was taken — never the required jug-only
+      // baseWeight reading was taken — never the required jug-only
       // Starting weight, which is a different measurement basis.
       weight, outdoorDB, indoorWB, liquidTemp,
       lowPsig, highPsig, suctionTemp,
       vsat, lsat, actualSH, targetSH, shError, condensingSplit, subcooling,
-      targetVSAT, targetLowPsig,
+      targetVSAT, targetLowPsig, targetLowPsigSource,
       stepOz, totalOz, shDropPerOz, ozPerDegree, lbPerDegree,
       estRate, estRateSource, estRatePrediction, estTotalOz, estRemainingOz,
       notes: s.notes || ''
     });
 
-    // Baseline only seeds the chain if it has a real chargeWeight reading
+    // Baseline only seeds the chain if it has a real baseWeight reading
     // (weight is NaN there otherwise), so this naturally excludes the
     // jug-only Starting weight from ever being diffed against.
     prevWeight = isNaN(weight) ? prevWeight : weight;
@@ -938,17 +1147,23 @@ function buildLineChart(seriesList, opts={}){
   const allPoints = seriesList.flatMap(s => s.points);
   if(allPoints.length === 0) return null;
 
-  let xMin = Math.min(...allPoints.map(p=>p.x));
-  let xMax = Math.max(...allPoints.map(p=>p.x));
+  let xMin = opts.xMin!==undefined ? opts.xMin : Math.min(...allPoints.map(p=>p.x));
+  let xMax = opts.xMax!==undefined ? opts.xMax : Math.max(...allPoints.map(p=>p.x));
   if(xMin === xMax){ xMax = xMin + 1; }
 
-  let yVals = allPoints.map(p=>p.y);
-  if(opts.zeroLine) yVals = yVals.concat([0]);
-  if(opts.yZones) yVals = yVals.concat(opts.yZones.flatMap(z=>[z[0],z[1]]).filter(v=>isFinite(v)));
-  let yMin = Math.min(...yVals), yMax = Math.max(...yVals);
-  if(yMin === yMax){ yMin -= 1; yMax += 1; }
-  const pad = (yMax-yMin)*0.15;
-  yMin -= pad; yMax += pad;
+  let yMin, yMax;
+  if(opts.yMin!==undefined && opts.yMax!==undefined){
+    yMin = opts.yMin; yMax = opts.yMax;
+  } else {
+    let yVals = allPoints.map(p=>p.y);
+    if(opts.zeroLine) yVals = yVals.concat([0]);
+    if(opts.refLine!==undefined && opts.refLine!==null) yVals = yVals.concat([opts.refLine]);
+    if(opts.yZones) yVals = yVals.concat(opts.yZones.flatMap(z=>[z[0],z[1]]).filter(v=>isFinite(v)));
+    yMin = Math.min(...yVals); yMax = Math.max(...yVals);
+    if(yMin === yMax){ yMin -= 1; yMax += 1; }
+    const pad = (yMax-yMin)*0.15;
+    yMin -= pad; yMax += pad;
+  }
 
   const sx = x => M.l + (x-xMin)/(xMax-xMin)*plotW;
   const sy = y => M.t + plotH - (y-yMin)/(yMax-yMin)*plotH;
@@ -968,6 +1183,11 @@ function buildLineChart(seriesList, opts={}){
     zeroHtml = `<line x1="${M.l}" y1="${sy(0).toFixed(1)}" x2="${W-M.r}" y2="${sy(0).toFixed(1)}" stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="3,3"/>`;
   }
 
+  let refLineHtml = '';
+  if(opts.refLine!==undefined && opts.refLine!==null && opts.refLine>=yMin && opts.refLine<=yMax){
+    refLineHtml = `<line x1="${M.l}" y1="${sy(opts.refLine).toFixed(1)}" x2="${W-M.r}" y2="${sy(opts.refLine).toFixed(1)}" stroke="var(--amber)" stroke-width="1" stroke-dasharray="3,3"/>`;
+  }
+
   // y-axis ticks (4 steps)
   let yTicks = '';
   const ySteps = 4;
@@ -981,8 +1201,11 @@ function buildLineChart(seriesList, opts={}){
       <text x="${M.l-6}" y="${(y+3).toFixed(1)}" text-anchor="end" class="chart-svg-text">${fmtYTick(v)}</text>`;
   }
 
-  // x-axis ticks based on actual x values present (thin out if crowded)
-  const xUnique = [...new Set(allPoints.map(p=>p.x))].sort((a,b)=>a-b);
+  // x-axis ticks based on actual x values present (thin out if crowded).
+  // Uses opts.xTickPoints if given (e.g. just the real readings) instead
+  // of every series' points, since a densely-sampled fit curve would
+  // otherwise dominate the tick candidates with arbitrary values.
+  const xUnique = [...new Set((opts.xTickPoints || allPoints).map(p=>p.x))].sort((a,b)=>a-b);
   const maxTicks = 6;
   const xTickStride = Math.max(1, Math.ceil(xUnique.length / maxTicks));
   const xLabelFn = opts.xLabelFn || fmt1;
@@ -994,10 +1217,13 @@ function buildLineChart(seriesList, opts={}){
   let seriesHtml = seriesList.map(s => {
     const pts = s.points.filter(p => p.y!==null && !isNaN(p.y));
     if(pts.length===0) return '';
-    const path = pts.map((p,i) => `${i===0?'M':'L'} ${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
-    const dash = s.dashed ? 'stroke-dasharray="5,4"' : '';
-    const line = `<path d="${path}" stroke="${s.color}" stroke-width="2" fill="none" ${dash}/>`;
-    const dots = pts.map(p => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3" fill="${s.color}"/>`).join('');
+    let line = '';
+    if(!s.noLine){
+      const path = pts.map((p,i) => `${i===0?'M':'L'} ${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
+      const dash = s.dashed ? 'stroke-dasharray="5,4"' : '';
+      line = `<path d="${path}" stroke="${s.color}" stroke-width="2" fill="none" ${dash}/>`;
+    }
+    const dots = s.noDots ? '' : pts.map(p => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3" fill="${s.color}"/>`).join('');
     return line + dots;
   }).join('');
 
@@ -1005,12 +1231,12 @@ function buildLineChart(seriesList, opts={}){
     ${zonesHtml}
     ${yTicks}
     ${zeroHtml}
+    ${refLineHtml}
     ${xTicks}
     ${seriesHtml}
   </svg>`;
 }
 
-const readingTickFn = x => `#${Math.round(x)}`;
 const psigTickFn = x => `${Math.round(x)}`;
 
 // Wraps a chart's SVG with small axis-label captions (y rotated on the
@@ -1028,22 +1254,85 @@ function chartWithAxisLabels(svgHtml, xLabel, yLabel){
 }
 
 function buildDeviationChart(rows){
-  const points = rows.filter(r => r.shError!==null).map(r => ({x:r.idx, y:r.shError}));
-  return buildLineChart(
-    [{label:'SH deviation', color:'var(--text)', points}],
-    { zeroLine:true, xLabelFn: readingTickFn, yZones:[
+  const points = rows.filter(r => r.shError!==null && !isNaN(r.lowPsig)).map(r => ({x:r.lowPsig, y:r.shError}));
+  if(points.length===0) return null;
+
+  // Overlay the same LOW-vs-SLT fit TLOW is solved from, converted into a
+  // predicted-deviation curve (predicted SLT − VSAT(LOW) − target SH) —
+  // so this chart visually explains the number driving TLOW, rather than
+  // just connecting the actual readings with straight segments.
+  const fitPoints = rows.filter(r => !isNaN(r.lowPsig) && !isNaN(r.suctionTemp)).map(r => ({x:r.lowPsig, y:r.suctionTemp}));
+  const targetSH = rows[rows.length-1].targetSH;
+  let fitSeries = null;
+  const sltModel = sltModelForPoints(fitPoints);
+  if(sltModel && targetSH!==null){
+    const xs = fitPoints.map(p=>p.x);
+    const xMin = Math.min(...xs), xMax = Math.max(...xs), span = (xMax-xMin) || 10;
+    const padFrac = fitPoints.length>=3 ? 0.15 : 0.3;
+    const lo = xMin - span*padFrac, hi = xMax + span*padFrac;
+    const curvePts = [];
+    for(let i=0;i<=24;i++){
+      const x = lo + (hi-lo)*i/24;
+      const vsat = satTempFromPsig(x);
+      if(vsat===null) continue;
+      curvePts.push({x, y: sltModel(x) - vsat - targetSH});
+    }
+    if(curvePts.length>0) fitSeries = {label:'fitted', color:'var(--amber)', points:curvePts, noDots:true};
+  }
+
+  const series = [{label:'SH deviation', color:'var(--text)', points, noLine:true}];
+  if(fitSeries) series.push(fitSeries);
+
+  const yMax = Math.max(...points.map(p=>p.y)) + 10;
+  const yMin = -15;
+
+  return buildLineChart(series, {
+    zeroLine:true, xLabelFn: psigTickFn, xTickPoints: points, yMin, yMax, yZones:[
       [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
-    ]}
-  );
+    ]
+  });
 }
 
-function buildShTshChart(rows){
-  const shPoints = rows.filter(r => r.actualSH!==null).map(r => ({x:r.idx, y:r.actualSH}));
-  const tshPoints = rows.filter(r => r.targetSH!==null).map(r => ({x:r.idx, y:r.targetSH}));
-  return buildLineChart([
-    {label:'SH', color:'var(--low)', points:shPoints},
-    {label:'TSH', color:'var(--text-dim)', dashed:true, points:tshPoints}
-  ], { xLabelFn: readingTickFn });
+// Visualizes the model actually driving TLOW: the session's own observed
+// (LOW, SLT) points, the fitted curve through them (linear or the
+// monotonic atan model, same fit used in resolveFields), and the
+// assumed-max-healthy-SLT cap as a reference line — so the fit backing
+// that number is visible and checkable, not just its final output.
+// Same tiering resolveFields uses for TLOW: a line through 2 points, the
+// monotonic atan model through 3+. Shared here so every chart built from
+// this model stays consistent with what TLOW is actually solved from.
+function sltModelForPoints(fitPoints){
+  if(fitPoints.length>=3) return fitAtanModel(fitPoints);
+  if(fitPoints.length===2) return fitLinearFn(fitPoints[0], fitPoints[1]);
+  return null;
+}
+
+function buildLowSltFitChart(rows, sltCap){
+  const points = rows.filter(r => !isNaN(r.lowPsig) && !isNaN(r.suctionTemp)).map(r => ({x:r.lowPsig, y:r.suctionTemp}));
+  if(points.length===0) return null;
+
+  const xs = points.map(p=>p.x);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const span = (xMax-xMin) || 10;
+
+  let fitSeries = null;
+  const model = sltModelForPoints(points);
+  if(model){
+    const padFrac = points.length>=3 ? 0.15 : 0.3;
+    const lo = xMin - span*padFrac, hi = xMax + span*padFrac;
+    const curvePts = [];
+    for(let i=0;i<=24;i++){ const x = lo + (hi-lo)*i/24; curvePts.push({x, y:model(x)}); }
+    fitSeries = {label: points.length>=3 ? 'fitted (atan)' : 'fitted (linear)', color:'var(--amber)', points:curvePts, noDots:true};
+  }
+
+  const series = [{label:'readings', color:'var(--low)', points, noLine:true}];
+  if(fitSeries) series.push(fitSeries);
+
+  return buildLineChart(series, {
+    xLabelFn: psigTickFn,
+    xTickPoints: points,
+    refLine: sltCap
+  });
 }
 
 /* =========================================================
@@ -1055,9 +1344,9 @@ function collectDeviationTrendBySite(site){
   if(!site) return [];
   return (site.archive || [])
     .map(s => {
-      const rows = resolveFields(s.baseline, s.steps);
+      const rows = resolveFields(s.baseline, s.steps, {sltCap: currentSltCap()});
       const baseline = rows[0];
-      return { x: s.id, y: baseline.shError, type: s.type || 'recharge' };
+      return { x: s.closedAt || s.id, y: baseline.shError, type: s.type || 'recharge' };
     })
     .filter(p => p.y!==null && !isNaN(p.x))
     .sort((a,b) => a.x-b.x);
@@ -1090,21 +1379,23 @@ function collectLeakRateTrend(site){
   return points;
 }
 
-function buildLeakRateTrendChart(site){
+function buildLeakRateTrendChart(site, xDomain){
   const points = collectLeakRateTrend(site);
   if(points.length===0) return null;
   return buildLineChart(
-    [{label:'lb lost/month', color:'var(--amber)', points}],
-    { xLabelFn: dateLabelFn }
+    [{label:'lb lost/month', color:'var(--amber)', points, noLine:true}],
+    { xLabelFn: dateLabelFn, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max }
   );
 }
 
-function buildDeviationTrendChart(site){
+function buildDeviationTrendChart(site, xDomain){
   const points = collectDeviationTrendBySite(site);
   if(points.length===0) return null;
+  const yMax = Math.max(...points.map(p=>p.y)) + 10;
+  const yMin = -15;
   return buildLineChart(
-    [{label:'as-found SH deviation', color:'var(--text)', points}],
-    { zeroLine:true, xLabelFn: dateLabelFn,
+    [{label:'as-found SH deviation', color:'var(--text)', points, noLine:true}],
+    { zeroLine:true, xLabelFn: dateLabelFn, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max, yMin, yMax,
       yZones:[
         [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
       ]}
@@ -1277,27 +1568,28 @@ function renderSitePanel(){
       <span class="tag">${site.archive.length + (site.active?1:0)} session${(site.archive.length + (site.active?1:0))===1?'':'s'} on record</span>
     </div>
     <div class="site-row">
-      <select id="siteSelect">
+      <select id="siteSelect" ${active?'disabled title="Close (or cancel) the current session first"':''}>
         ${sites.map(s => `<option value="${s.id}" ${s.id===currentSiteId?'selected':''}>${s.name}</option>`).join('')}
       </select>
-      <button class="btn ghost" id="newSiteBtn" style="font-size:12px;padding:6px 12px;">New site</button>
-      <button class="btn ghost" id="editSiteBtn" style="font-size:12px;padding:6px 12px;">Edit</button>
-      <button class="btn ghost" id="demoSiteBtn2" style="font-size:12px;padding:6px 12px;">Add demo site</button>
-      <button class="btn danger" id="deleteSiteBtn" style="font-size:12px;padding:6px 12px;">Delete site</button>
+      <button class="btn ghost" id="newSiteBtn" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">New</button>
+      <button class="btn ghost" id="siteImportTriggerBtn" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">Import</button>
+      <button class="btn ghost" id="siteExportBtn" style="font-size:12px;padding:6px 12px;">Export</button>
+      <button class="btn ghost" id="demoSiteBtn2" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">Add demo</button>
+      <button class="btn danger" id="deleteSiteBtn" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">Delete</button>
+      <input type="file" id="siteImportFile" accept="application/json" style="display:none;">
     </div>
     <div class="site-info-strip">
       <div class="item"><div class="k">Refrigerant</div><div class="v">${site.refrigerant}</div></div>
       <div class="item"><div class="k">Metering</div><div class="v">${site.meteringType}</div></div>
       <div class="item"><div class="k">Nameplate charge</div><div class="v">${site.nameplateOz ? site.nameplateOz+' oz ('+fmt2(site.nameplateOz/16)+' lb)' : '—'}</div></div>
       <div class="item"><div class="k">System size</div><div class="v">${site.tons ? site.tons+' ton' : '—'}</div></div>
+      <div class="item"><div class="k">Max healthy SLT</div><div class="v">${sltCapFor(site)}°F${site.sltCap==null?' (default)':''}</div></div>
+    </div>
+    <div class="btn-row" style="margin-top:12px;">
+      <button class="btn primary" id="editSiteBtn">Edit</button>
     </div>
     <div id="siteEditForm"></div>
-    <div class="backup-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-soft);">
-      <button class="btn ghost" id="siteExportBtn" style="font-size:12px;padding:6px 12px;">Export this site (.json)</button>
-      <button class="btn ghost" id="siteImportTriggerBtn" style="font-size:12px;padding:6px 12px;">Import a site</button>
-      <input type="file" id="siteImportFile" accept="application/json">
-    </div>
-    <div class="backup-note">Move just "${site.name}" to another device, or hand it to yourself later — named after the site so it's easy to tell apart from others. For everything at once, use Backup at the bottom of the page.</div>
+    <div class="backup-note" style="margin-top:12px;">Export moves just "${site.name}" to another device, or hands it to yourself later — named after the site so it's easy to tell apart from others. For everything at once, use Backup at the bottom of the page.</div>
   `;
   document.getElementById('siteSelect').onchange = (e) => onSwitchSite(e.target.value);
   document.getElementById('newSiteBtn').onclick = onShowNewSiteForm;
@@ -1306,7 +1598,13 @@ function renderSitePanel(){
   document.getElementById('deleteSiteBtn').onclick = onDeleteSite;
   document.getElementById('siteExportBtn').onclick = exportSite;
   const siteImportFile = document.getElementById('siteImportFile');
-  document.getElementById('siteImportTriggerBtn').onclick = () => siteImportFile.click();
+  document.getElementById('siteImportTriggerBtn').onclick = async () => {
+    if(active){
+      await showAlertModal('Close (or cancel) the current session before importing a site — an import could overwrite it.');
+      return;
+    }
+    siteImportFile.click();
+  };
   siteImportFile.onchange = () => {
     if(siteImportFile.files && siteImportFile.files[0]){
       importSiteFile(siteImportFile.files[0]);
@@ -1317,7 +1615,11 @@ function renderSitePanel(){
 
 let siteFormMode = null; // null | 'new' | 'edit'
 
-function onShowNewSiteForm(){
+async function onShowNewSiteForm(){
+  if(active){
+    await showAlertModal('Close (or cancel) the current session before creating a new site — creating one switches you to it.');
+    return;
+  }
   siteFormMode = 'new';
   renderSiteEditForm();
 }
@@ -1337,6 +1639,11 @@ function renderSiteEditForm(){
         <div class="field"><label>Nameplate charge<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="1" id="siteFormOz" value="${site&&site.nameplateOz?site.nameplateOz:''}" placeholder="oz"></div>
         <div class="field"><label>System size<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="0.5" id="siteFormTons" value="${site&&site.tons?site.tons:''}" placeholder="tons"></div>
       </div>
+      <div class="field-grid" style="margin-top:12px;">
+        <div class="field"><label>Assumed max healthy SLT<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="1" id="siteFormSltCap" value="${site&&site.sltCap!=null?site.sltCap:''}" placeholder="55">
+        <div class="field-note">used for the rough first-reading TLOW estimate before this session has enough of its own data — a properly-running system's suction line temp shouldn't realistically run above this, even on a hot day. Default is 55°F; raise it for a site that legitimately runs warmer (e.g. very hot/humid climates), lower it if this site tends to overshoot with the default.</div>
+        </div>
+      </div>
       <div class="btn-row">
         <button class="btn primary" id="siteFormSaveBtn">${siteFormMode==='edit'?'Save changes':'Create site'}</button>
         <button class="btn ghost" id="siteFormCancelBtn">Cancel</button>
@@ -1350,15 +1657,21 @@ function renderSiteEditForm(){
 async function onSaveSiteForm(){
   const name = document.getElementById('siteFormName').value.trim();
   if(!name) return;
+  if(siteFormMode==='new' && active){
+    await showAlertModal('Close (or cancel) the current session before creating a new site — creating one switches you to it.');
+    return;
+  }
   const nameplateOz = document.getElementById('siteFormOz').value;
   const tons = document.getElementById('siteFormTons').value;
+  const sltCapVal = document.getElementById('siteFormSltCap').value;
+  const sltCap = sltCapVal==='' ? undefined : Number(sltCapVal);
   if(siteFormMode==='new'){
-    const site = { id:newSiteId(), name, refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz, tons, createdAt:Date.now(), active:null, archive:[] };
+    const site = { id:newSiteId(), name, refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz, tons, sltCap, createdAt:Date.now(), active:null, archive:[] };
     sites.push(site);
     currentSiteId = site.id;
   } else {
     const site = currentSite();
-    site.name = name; site.nameplateOz = nameplateOz; site.tons = tons;
+    site.name = name; site.nameplateOz = nameplateOz; site.tons = tons; site.sltCap = sltCap;
   }
   siteFormMode = null;
   syncActiveArchiveFromSite();
@@ -1380,6 +1693,11 @@ async function onCreateSite(){
 }
 
 async function onSwitchSite(id){
+  if(active && id !== currentSiteId){
+    await showAlertModal('Close (or cancel) the current session before switching sites — otherwise it\'d be easy to lose track of readings still in progress.');
+    renderSitePanel(); // reset the dropdown's visual selection back to the current site
+    return;
+  }
   editingRowIdx = null;
   currentSiteId = id;
   syncActiveArchiveFromSite();
@@ -1393,6 +1711,10 @@ async function onSwitchSite(id){
 async function onDeleteSite(){
   const site = currentSite();
   if(!site) return;
+  if(active){
+    await showAlertModal('Close (or cancel) the current session before deleting this site — deleting it would discard that session too.');
+    return;
+  }
   const ok = await showConfirmModal(`Delete "${site.name}" and all its session history? This can't be undone.`);
   if(!ok) return;
   sites = sites.filter(s => s.id !== site.id);
@@ -1403,6 +1725,10 @@ async function onDeleteSite(){
 }
 
 async function onAddDemoSite(){
+  if(active){
+    await showAlertModal('Close (or cancel) the current session before adding the demo site — adding it switches you to it.');
+    return;
+  }
   const demo = buildDemoSite();
   sites.push(demo);
   currentSiteId = demo.id;
@@ -1415,14 +1741,14 @@ function buildDemoSite(){
   const now = Date.now();
   const day = 24*60*60*1000;
   const sessionA = {
-    id: now - 75*day, type:'recharge', createdAt: now-75*day, closedAt: now-75*day+40*60*1000,
+    id: now - 75*day, type:'recharge', createdAt: now-75*day, closedAt: now-75*day+40*60*1000, closedAtStr: tsStr(now-75*day+40*60*1000),
     baseline: {
-      jugWeight:25.00, lowPsig:42, highPsig:215, suctionTemp:64, outdoorDB:78, indoorWB:68, liquidTemp:80,
+      startWeight:25.00, lowPsig:42, highPsig:215, suctionTemp:64, outdoorDB:78, indoorWB:68, liquidTemp:80,
       notes:'Demo data — annual checkup found low charge', timestamp: now-75*day
     },
     steps: [
-      {jugWeight:24.75, lowPsig:52, highPsig:222, suctionTemp:62, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+15*60*1000},
-      {jugWeight:24.50, lowPsig:60, highPsig:228, suctionTemp:60, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+35*60*1000}
+      {lowPsig:52, highPsig:222, suctionTemp:62, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+15*60*1000},
+      {lowPsig:60, highPsig:228, suctionTemp:60, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+35*60*1000}
     ],
     finalWeight: 24.50, finalWeightAt: now-75*day+35*60*1000, finalWeightAtStr: tsStr(now-75*day+35*60*1000)
   };
@@ -1432,14 +1758,14 @@ function buildDemoSite(){
   sessionA.summary = { totalOz: measuredA!==null?measuredA:lastA.totalOz, finalError:lastA.shError, stepCount:sessionA.steps.length };
 
   const sessionB = {
-    id: now - 20*day, type:'recharge', createdAt: now-20*day, closedAt: now-20*day+45*60*1000,
+    id: now - 20*day, type:'recharge', createdAt: now-20*day, closedAt: now-20*day+45*60*1000, closedAtStr: tsStr(now-20*day+45*60*1000),
     baseline: {
-      jugWeight:26.00, lowPsig:44, highPsig:250, suctionTemp:70, outdoorDB:92, indoorWB:69, liquidTemp:88,
+      startWeight:26.00, baseWeight:26.15, lowPsig:44, highPsig:250, suctionTemp:70, outdoorDB:92, indoorWB:69, liquidTemp:88,
       notes:'Demo data — hot week, tenant reported weak cooling', timestamp: now-20*day
     },
     steps: [
-      {jugWeight:25.70, lowPsig:52, highPsig:258, suctionTemp:67, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+15*60*1000},
-      {jugWeight:25.35, lowPsig:58, highPsig:264, suctionTemp:65, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+40*60*1000}
+      {stepWeight:25.70, lowPsig:52, highPsig:258, suctionTemp:67, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+15*60*1000},
+      {stepWeight:25.35, lowPsig:58, highPsig:264, suctionTemp:65, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+40*60*1000}
     ],
     finalWeight: 25.35, finalWeightAt: now-20*day+40*60*1000, finalWeightAtStr: tsStr(now-20*day+40*60*1000)
   };
@@ -1448,11 +1774,27 @@ function buildDemoSite(){
   const measuredB = sessionMeasuredTotalOz(sessionB);
   sessionB.summary = { totalOz: measuredB!==null?measuredB:lastB.totalOz, finalError:lastB.shError, stepCount:sessionB.steps.length };
 
+  const sessionC = {
+    id: now - 5*day, type:'checkup', createdAt: now-5*day, createdAtStr: tsStr(now-5*day),
+    closedAt: now-5*day+12*60*1000, closedAtStr: tsStr(now-5*day+12*60*1000),
+    baseline: {
+      lowPsig:61, highPsig:256, suctionTemp:52, outdoorDB:90, indoorWB:68, liquidTemp:90,
+      notes:'Demo data — routine follow-up checkup after the last recharge', timestamp: now-5*day
+    },
+    steps: [
+      {lowPsig:60, highPsig:258, suctionTemp:51, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-5*day+6*60*1000},
+      {lowPsig:61, highPsig:257, suctionTemp:52, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-5*day+12*60*1000}
+    ]
+  };
+  const rowsC = resolveFields(sessionC.baseline, sessionC.steps);
+  const lastC = rowsC[rowsC.length-1];
+  sessionC.summary = { totalOz: null, finalError:lastC.shError, stepCount:sessionC.steps.length };
+
   return {
-    id: newSiteId(), name:'Demo site (learn the tool)', refrigerant:'R-22', meteringType:'Fixed-orifice',
+    id: newSiteId(), name:'Demo', refrigerant:'R-22', meteringType:'Fixed-orifice',
     nameplateOz:79, tons:3.5, createdAt: now-75*day,
     active: null,
-    archive: [sessionB, sessionA]
+    archive: [sessionC, sessionB, sessionA]
   };
 }
 
@@ -1484,12 +1826,13 @@ function renderBaselinePanel(){
       ` : ''}
       <div class="field-grid" style="grid-template-columns:1fr 1fr;">
         ${fieldNumber('blow','LOW — Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig'})}
-        ${fieldNumber('bhigh','HIGH — High-side pressure',{required:true,tone:'high',step:'1',placeholder:'psig'})}
-        ${fieldNumber('bliquid','LLT — Liquid line temp',{step:'0.1',placeholder:'°F, for subcooling'})}
+        ${fieldNumber('bhigh','HIGH — High-side pressure',{tone:'high',step:'1',placeholder:'psig',optLabel:'optional'})}
         ${fieldNumber('bsuction','SLT — Suction line temp',{required:true,step:'0.1',placeholder:'°F'})}
-        ${fieldNumber('bodb','ODDB — Outdoor dry-bulb',{step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.outdoorDB):''})}
-        ${fieldNumber('biwb','IDWB — Indoor wet-bulb',{step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.indoorWB):''})}
+        ${fieldNumber('bliquid','LLT — Liquid line temp',{step:'0.1',placeholder:'°F, for subcooling'})}
+        ${fieldNumber('biwb','IDWB — Indoor wet-bulb',{required:true,step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.indoorWB):''})}
+        ${fieldNumber('bodb','ODDB — Outdoor dry-bulb',{required:true,step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.outdoorDB):''})}
       </div>
+      ${wbHelperBlock('b','biwb',{abbrevLabels:true})}
       ${pendingSessionType==='recharge' ? `
       <div class="field" style="margin-top:12px;">
         <label>Weight at baseline<span class="opt">optional</span></label>
@@ -1499,7 +1842,6 @@ function renderBaselinePanel(){
         </div>
       </div>
       ` : ''}
-      ${wbHelperBlock('b','biwb',{abbrevLabels:true})}
       <div class="field" style="margin-top:12px;">
         <label>Notes<span class="opt">optional</span></label>
         <input type="text" id="bnotes" placeholder="e.g. R-22, aging condenser, low charge suspected">
@@ -1517,7 +1859,7 @@ function renderBaselinePanel(){
     wireWbHelpers(el);
   } else {
     const b = active.baseline;
-    const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite())});
+    const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite()), sltCap: currentSltCap()});
     const last = rows[rows.length-1];
     const isCheckup = active.type === 'checkup';
     const measuredTotal = sessionMeasuredTotalOz(active);
@@ -1537,18 +1879,21 @@ function renderBaselinePanel(){
       </div>
       ${!isCheckup ? `
       <div class="field-grid" style="margin-top:12px;">
-        ${fieldNumber('startWeightInput','Starting weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:b.jugWeight!=null?b.jugWeight:''})}
+        ${fieldNumber('startWeightInput','Starting weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:b.startWeight!=null?b.startWeight:''})}
         ${fieldNumber('finalWeightInput','Final weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:active.finalWeight!=null?active.finalWeight:''})}
         <div class="field"><label>&nbsp;</label><button class="btn ghost" id="saveFinalWeightBtn" style="width:100%;">Update weight</button></div>
       </div>
       ` : ''}
       <div class="btn-row">
         <button class="btn primary" id="archiveBtn">Close ${isCheckup?'checkup':'session'}</button>
+        ${resumedFromArchive ? `<button class="btn ghost" id="cancelResumeBtn">Cancel</button>` : ''}
       </div>
     `;
     document.getElementById('archiveBtn').onclick = onArchiveSession;
     const saveFinalWeightBtn = document.getElementById('saveFinalWeightBtn');
     if(saveFinalWeightBtn) saveFinalWeightBtn.onclick = onUpdateWeights;
+    const cancelResumeBtn = document.getElementById('cancelResumeBtn');
+    if(cancelResumeBtn) cancelResumeBtn.onclick = onCancelResume;
   }
 }
 
@@ -1556,7 +1901,7 @@ function onUpdateWeights(){
   const startV = document.getElementById('startWeightInput').value;
   const finalV = document.getElementById('finalWeightInput').value;
   if(startV !== ''){
-    active.baseline.jugWeight = Number(startV);
+    active.baseline.startWeight = Number(startV);
   }
   if(finalV !== ''){
     const now = Date.now();
@@ -1578,14 +1923,15 @@ function tsStr(ms){ return ms ? new Date(ms).toLocaleString() : null; }
 
 function onStartSession(){
   editingRowIdx = null;
-  const req = pendingSessionType==='recharge' ? ['bw','blow','bhigh','bsuction'] : ['blow','bhigh','bsuction'];
+  resumedFromArchive = null;
+  const req = pendingSessionType==='recharge' ? ['bw','blow','bsuction','biwb','bodb'] : ['blow','bsuction','biwb','bodb'];
   const errEl = document.getElementById('baselineErr');
   for(const id of req){
     const v = document.getElementById(id).value;
     if(v===''){
       errEl.textContent = pendingSessionType==='recharge'
-        ? 'Fill in jug weight, low/high pressure, and suction temp to start.'
-        : 'Fill in low/high pressure and suction temp to start.';
+        ? 'Fill in jug weight, low pressure, suction temp, indoor wet-bulb, and outdoor dry-bulb to start.'
+        : 'Fill in low pressure, suction temp, indoor wet-bulb, and outdoor dry-bulb to start.';
       errEl.style.display = 'block';
       return;
     }
@@ -1593,10 +1939,10 @@ function onStartSession(){
   const now = Date.now();
   const bweightEl = document.getElementById('bweight');
   const baseline = {
-    jugWeight: pendingSessionType==='recharge' ? Number(document.getElementById('bw').value) : undefined,
-    chargeWeight: (bweightEl && bweightEl.value!=='') ? Number(bweightEl.value) : undefined,
+    startWeight: pendingSessionType==='recharge' ? Number(document.getElementById('bw').value) : undefined,
+    baseWeight: (bweightEl && bweightEl.value!=='') ? Number(bweightEl.value) : undefined,
     lowPsig: Number(document.getElementById('blow').value),
-    highPsig: Number(document.getElementById('bhigh').value),
+    highPsig: document.getElementById('bhigh').value === '' ? undefined : Number(document.getElementById('bhigh').value),
     suctionTemp: Number(document.getElementById('bsuction').value),
     outdoorDB: document.getElementById('bodb').value,
     indoorWB: document.getElementById('biwb').value,
@@ -1616,11 +1962,8 @@ function onStartSession(){
 async function onArchiveSession(){
   if(!active) return;
   editingRowIdx = null;
-  const wantsExport = await showConfirmModal('Export a backup before closing this out?');
-  if(wantsExport){
-    await exportSite();
-  }
-  const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite())});
+  resumedFromArchive = null;
+  const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite()), sltCap: currentSltCap()});
   const last = rows[rows.length-1];
   const measuredTotal = sessionMeasuredTotalOz(active);
   const now = Date.now();
@@ -1648,7 +1991,7 @@ function renderAmbientPanel(){
   const el = document.getElementById('ambientPanel');
   if(!active){ el.style.display='none'; return; }
   el.style.display = 'block';
-  const rows = resolveFields(active.baseline, active.steps);
+  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
   const last = rows[rows.length-1];
   const ambientRows = rows.filter(r => r.ambientProvided);
   const lastAmbientRow = ambientRows[ambientRows.length-1];
@@ -1692,7 +2035,7 @@ function renderAmbientPanel(){
 }
 
 function onAmbientRecheck(){
-  const rows = resolveFields(active.baseline, active.steps);
+  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
   const last = rows[rows.length-1];
   const now = Date.now();
   const entry = {
@@ -1720,7 +2063,7 @@ function renderStepPanel(){
   if(!active){ el.style.display='none'; return; }
   el.style.display = 'block';
   const isCheckup = active.type === 'checkup';
-  const rows = resolveFields(active.baseline, active.steps);
+  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
   const last = rows[rows.length-1];
 
   el.innerHTML = `
@@ -1781,7 +2124,7 @@ function onAddStep(){
     lowPsig: Number(document.getElementById('slow').value),
     highPsig: Number(document.getElementById('shigh').value),
     suctionTemp: Number(document.getElementById('ssuction').value),
-    jugWeight: weightVal==='' ? undefined : Number(weightVal),
+    stepWeight: weightVal==='' ? undefined : Number(weightVal),
     outdoorDB: document.getElementById('sodb').value,
     indoorWB: document.getElementById('siwb').value,
     indoorDB: document.getElementById('siddb').value,
@@ -1818,7 +2161,7 @@ function renderResultsPanel(){
   el.style.display = 'block';
   const isCheckup = active.type === 'checkup';
   const predictRate = buildPredictRateForSite(currentSite());
-  const rows = resolveFields(active.baseline, active.steps, {predictRate});
+  const rows = resolveFields(active.baseline, active.steps, {predictRate, sltCap: currentSltCap()});
   const row = rows[rows.length-1];
   const reco = recommendation(row, active.type);
   const recoClass = {add:'add',stop:'stop',warn:'warn',idle:'idle'}[reco.level];
@@ -1863,7 +2206,7 @@ function renderResultsPanel(){
         <div class="ro"><div class="k">SH — Actual superheat</div><div class="v">${fmt1(row.actualSH)}°F</div></div>
         <div class="ro"><div class="k">LOW — Low-side pressure</div><div class="v low">${fmt1(row.lowPsig)} psig</div></div>
         <div class="ro"><div class="k">TSH — Target superheat</div><div class="v">${fmt1(row.targetSH)}°F</div></div>
-        <div class="ro"><div class="k">Target LOW — Target low-side pressure</div><div class="v low">${row.targetLowPsig===null?'—':Math.round(row.targetLowPsig)+' psig'}</div></div>
+        <div class="ro"><div class="k">TLOW — Target low-side pressure${row.targetLowPsigSource==='theoretical'?' (rough, first reading)':''}</div><div class="v low">${row.targetLowPsig===null?'—':Math.round(row.targetLowPsig)+' psig'}</div></div>
       </div>
     </div>
     <div class="reco ${recoClass}">
@@ -1920,7 +2263,7 @@ function renderResultsPanel(){
 
 async function onSuggestRechargeFromCheckup(){
   if(!active || active.type !== 'checkup') return;
-  const rows = resolveFields(active.baseline, active.steps);
+  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
   const last = rows[rows.length-1];
   baselinePrefill = { outdoorDB: last.outdoorDB, indoorWB: last.indoorWB };
   pendingSessionType = 'recharge';
@@ -1963,7 +2306,7 @@ function renderLogTable(rows){
           ${rows.map(r => `<tr>
             <td>${r.isBaseline ? 'Base' : (r.ambientOnly ? `${r.idx}·recheck` : r.idx)}</td>
             <td style="color:var(--low)">${fmt1(r.lowPsig)}</td>
-            <td class="${r.shError===null?'':(Math.abs(r.shError)<=3?'err-ok':(r.shError>0?'err-pos':'err-neg'))}">${r.shError===null?'—':(r.shError>0?'+':'')+fmt1(r.shError)}</td>
+            <td class="${r.shError===null?'':(Math.abs(r.shError)<=3?'err-ok':(r.shError>0?'err-pos':'err-neg'))}">${r.shError===null?'—':(r.shError>0?'+':'')+fmt1(r.shError)+'°F'}</td>
             <td>${fmt1(r.vsat)}°F</td>
             <td>${fmt1(r.suctionTemp)}°F</td>
             <td>${fmt1(r.actualSH)}°F</td>
@@ -1974,9 +2317,9 @@ function renderLogTable(rows){
             <td>${fmt1(r.liquidTemp)}°F</td>
             <td>${r.subcooling===null?'—':fmt1(r.subcooling)+'°F'}</td>
             <td>${fmt1(r.outdoorDB)}°F</td>
-            <td>${fmt2(r.weight)} lb</td>
+            <td>${isNaN(r.weight) ? '—' : fmt2(r.weight)+' lb'}</td>
             <td>${r.isBaseline || r.ambientOnly ? '—' : lbOnly(r.stepOz)}</td>
-            <td>${lbOnly(r.totalOz)}</td>
+            <td>${lbOnlyOrDash(r.totalOz)}</td>
             <td style="white-space:normal;min-width:120px;">${r.notes||''}</td>
           </tr>`).join('')}
         </tbody>
@@ -1989,7 +2332,7 @@ function renderChartsPanel(){
   const el = document.getElementById('chartsPanel');
   if(!active){ el.style.display='none'; return; }
   el.style.display = 'block';
-  const rows = resolveFields(active.baseline, active.steps);
+  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
 
   if(rows.length < 2){
     el.innerHTML = `
@@ -2002,27 +2345,24 @@ function renderChartsPanel(){
     return;
   }
 
-  const devChart = chartWithAxisLabels(buildDeviationChart(rows), 'Reading #', 'SH deviation (°F)');
-  const shTshChart = chartWithAxisLabels(buildShTshChart(rows), 'Reading #', 'Superheat (°F)');
+  const devChart = chartWithAxisLabels(buildDeviationChart(rows), 'Low-side pressure (psig)', 'SH deviation (°F)');
+  const sltCap = currentSltCap();
+  const lowSltChart = chartWithAxisLabels(buildLowSltFitChart(rows, sltCap), 'Low-side pressure (psig)', 'SLT (°F)');
+  const lastSource = rows[rows.length-1].targetLowPsigSource;
 
   el.innerHTML = `
     <div class="panel-head">
       <div class="panel-title">Charging trend</div>
-      <span class="tag">vs. reading #</span>
     </div>
     <div class="chart-block">
       <div class="chart-title">SH deviation</div>
-      <div class="chart-sub">Should trend toward 0 (green band) as refrigerant is added.</div>
+      <div class="chart-sub">Dots are actual readings; the amber line is the same fitted trend TLOW is solved from. Should trend toward 0 (green band) as refrigerant is added — points can zig-zag with pressure near equilibrium, but the fitted line shows the real trend underneath.</div>
       ${devChart || '<div class="chart-empty">Not enough data yet.</div>'}
     </div>
     <div class="chart-block">
-      <div class="chart-title">Actual SH vs Target SH</div>
-      <div class="chart-sub">Watch SH converge toward TSH — if TSH itself is moving, conditions shifted mid-job.</div>
-      ${shTshChart || '<div class="chart-empty">Not enough data yet.</div>'}
-      <div class="chart-legend">
-        <div class="legend-item"><span class="legend-swatch" style="background:var(--low)"></span>SH — Actual superheat</div>
-        <div class="legend-item"><span class="legend-swatch dashed"></span>TSH — Target superheat</div>
-      </div>
+      <div class="chart-title">LOW vs SLT — the model behind TLOW</div>
+      <div class="chart-sub">Dots are this session's actual readings; the amber line is the fitted trend (${lastSource||'—'}) TLOW is solved from. The dashed line is this site's assumed max healthy SLT (${sltCap}°F) — TLOW never recommends more pressure than that cap implies.</div>
+      ${lowSltChart || '<div class="chart-empty">Not enough data yet.</div>'}
     </div>
   `;
 }
@@ -2033,12 +2373,12 @@ function renderHistoryPanel(){
   const el = document.getElementById('historyPanel');
   if(!active){ el.style.display='none'; return; }
   el.style.display = 'block';
-  const rows = resolveFields(active.baseline, active.steps);
+  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
   const isCheckup = active.type === 'checkup';
   const measuredTotal = sessionMeasuredTotalOz(active);
   const weightSummary = !isCheckup ? `
     <div class="status-line">
-      Starting weight ${fmt2(active.baseline.jugWeight)} lb
+      Starting weight ${fmt2(active.baseline.startWeight)} lb
       ${active.finalWeight!=null ? ` · Final weight ${fmt2(active.finalWeight)} lb · Total added ${lbOz(measuredTotal)}` : ' · Final weight not yet recorded'}
     </div>
   ` : '';
@@ -2079,7 +2419,7 @@ function renderEditRowForm(rowIdx){
   const isBaseline = rowIdx===0;
   const target = isBaseline ? active.baseline : active.steps[rowIdx-1];
   if(!target) return '';
-  const weightVal = isBaseline ? target.chargeWeight : target.jugWeight;
+  const weightVal = isBaseline ? target.baseWeight : target.stepWeight;
   const rawVal = v => (v!==undefined && v!==null) ? v : '';
   return `
     <div class="field-grid" style="margin-top:12px;">
@@ -2148,9 +2488,9 @@ function onSaveEditRow(){
   target.notes = document.getElementById('erowNotes').value;
   const weightVal = document.getElementById('erowWeight').value;
   if(isBaseline){
-    target.chargeWeight = weightVal==='' ? undefined : Number(weightVal);
+    target.baseWeight = weightVal==='' ? undefined : Number(weightVal);
   } else {
-    target.jugWeight = weightVal==='' ? undefined : Number(weightVal);
+    target.stepWeight = weightVal==='' ? undefined : Number(weightVal);
   }
   editingRowIdx = null;
   saveActive();
@@ -2170,59 +2510,97 @@ async function onDeleteEditRow(){
 }
 
 let expandedArchiveIdx = null;
+let archiveSelectedIdx = null;
+
+// Read-only view of a past session's log and charts — the whole reason
+// this exists is so looking at a past session's trend never requires
+// Resume (which converts it back to active, and previously the only way
+// out was Close, which stamps a brand new closedAt over the original).
+function renderArchiveSessionDetail(session){
+  const rows = resolveFields(session.baseline, session.steps, {sltCap: currentSltCap()});
+  const devChart = chartWithAxisLabels(buildDeviationChart(rows), 'Low-side pressure (psig)', 'SH deviation (°F)');
+  const lowSltChart = chartWithAxisLabels(buildLowSltFitChart(rows, currentSltCap()), 'Low-side pressure (psig)', 'SLT (°F)');
+  return `
+    ${renderLogTable(rows)}
+    <div class="chart-block" style="margin-top:16px;">
+      <div class="chart-title">SH deviation</div>
+      ${devChart || '<div class="chart-empty">Not enough data yet.</div>'}
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">LOW vs SLT — the model behind TLOW</div>
+      ${lowSltChart || '<div class="chart-empty">Not enough data yet.</div>'}
+    </div>
+  `;
+}
 
 function renderArchivePanel(){
   const el = document.getElementById('archivePanel');
   if(archive.length===0){ el.style.display='none'; return; }
   el.style.display = 'block';
   const busy = !!active;
+
+  if(archiveSelectedIdx!==null && archiveSelectedIdx>=archive.length) archiveSelectedIdx = null;
+  if(expandedArchiveIdx!==null && expandedArchiveIdx>=archive.length) expandedArchiveIdx = null;
+
+  const hasSelection = archiveSelectedIdx!==null;
+  const selected = hasSelection ? archive[archiveSelectedIdx] : null;
+  const isOpen = hasSelection && expandedArchiveIdx === archiveSelectedIdx;
+
   el.innerHTML = `
     <div class="panel-head">
       <div class="panel-title">Past sessions</div>
       <span class="tag">${archive.length}</span>
     </div>
-    ${busy ? `<div class="status-line" style="margin-bottom:6px;">Close your current session to resume or duplicate one of these.</div>` : ''}
-    ${archive.map((s,i) => {
-      const rows = resolveFields(s.baseline, s.steps);
-      const isOpen = expandedArchiveIdx === i;
-      const isCheckup = s.type === 'checkup';
-      return `
-      <div class="archived-item" style="flex-direction:column;align-items:stretch;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+    ${busy ? `<div class="status-line" style="margin-bottom:6px;">Close your current session to resume one of these.</div>` : ''}
+    <div class="status-line" style="margin-bottom:2px;">Tap a session to select it.</div>
+    <div class="archive-list">
+      ${archive.map((s,i) => {
+        const isCheckup = s.type === 'checkup';
+        return `
+        <div class="archived-item selectable ${i===archiveSelectedIdx?'selected':''}" data-pick="${i}">
           <div class="meta">
             <span class="tag ${isCheckup?'':'low'}" style="margin-right:6px;">${isCheckup?'Checkup':'Recharge'}</span>
             <b>${new Date(s.id).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'})}</b>
-            — ${s.summary.stepCount} ${isCheckup?'readings':'steps'}${isCheckup?'':`, ${lbOnly(s.summary.totalOz)} added`},
+            — ${s.summary.stepCount + 1} ${isCheckup?'readings':'steps'}${isCheckup?'':`, ${lbOnly(s.summary.totalOz)} added`},
             final deviation ${s.summary.finalError===null?'—':(s.summary.finalError>0?'+':'')+fmt1(s.summary.finalError)+'°F'}
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn ghost" data-view="${i}" style="font-size:12px;padding:6px 12px;">${isOpen ? 'Hide log' : 'View log'}</button>
-            <button class="btn ghost" data-resume="${i}" ${busy?'disabled title="Close current session first"':''} style="font-size:12px;padding:6px 12px;">Resume</button>
-            <button class="btn danger" data-del="${i}" style="font-size:12px;padding:6px 12px;">Delete</button>
-          </div>
         </div>
-        ${isOpen ? renderLogTable(rows) : ''}
-      </div>
-    `;}).join('')}
+      `;}).join('')}
+    </div>
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn ghost" id="archiveViewBtn" ${hasSelection?'':'disabled'} style="font-size:12px;padding:6px 12px;">${isOpen ? 'Hide details' : 'View details'}</button>
+      <button class="btn ghost" id="archiveResumeBtn" ${(hasSelection && !busy)?'':'disabled'} title="${busy?'Close current session first':''}" style="font-size:12px;padding:6px 12px;">Resume</button>
+      <button class="btn danger" id="archiveDeleteBtn" ${hasSelection?'':'disabled'} style="font-size:12px;padding:6px 12px;">Delete</button>
+    </div>
+    ${isOpen ? renderArchiveSessionDetail(selected) : ''}
   `;
-  el.querySelectorAll('[data-view]').forEach(btn => {
-    btn.onclick = () => {
-      const i = Number(btn.dataset.view);
-      expandedArchiveIdx = expandedArchiveIdx === i ? null : i;
+
+  el.querySelectorAll('[data-pick]').forEach(row => {
+    row.onclick = () => {
+      const i = Number(row.dataset.pick);
+      archiveSelectedIdx = (archiveSelectedIdx===i) ? null : i; // tap again to deselect
       renderArchivePanel();
     };
   });
-  el.querySelectorAll('[data-resume]').forEach(btn => {
-    btn.onclick = () => onResumeSession(Number(btn.dataset.resume));
-  });
-  el.querySelectorAll('[data-del]').forEach(btn => {
-    btn.onclick = async () => {
-      archive.splice(Number(btn.dataset.del),1);
-      if(expandedArchiveIdx !== null) expandedArchiveIdx = null;
+  const viewBtn = document.getElementById('archiveViewBtn');
+  const resumeBtn = document.getElementById('archiveResumeBtn');
+  const delBtn = document.getElementById('archiveDeleteBtn');
+  if(hasSelection){
+    viewBtn.onclick = () => {
+      expandedArchiveIdx = isOpen ? null : archiveSelectedIdx;
+      renderArchivePanel();
+    };
+    resumeBtn.onclick = () => onResumeSession(archiveSelectedIdx);
+    delBtn.onclick = async () => {
+      const ok = await showConfirmModal(`Delete this ${selected.type==='checkup'?'checkup':'session'} from ${new Date(selected.id).toLocaleDateString()}? This can't be undone.`);
+      if(!ok) return;
+      archive.splice(archiveSelectedIdx,1);
+      expandedArchiveIdx = null;
+      archiveSelectedIdx = null;
       await saveArchive();
       renderAll();
     };
-  });
+  }
 }
 
 function renderSiteTrendPanel(){
@@ -2231,8 +2609,16 @@ function renderSiteTrendPanel(){
   if(!site || (site.archive || []).length===0){ el.style.display='none'; return; }
   el.style.display = 'block';
 
-  const rateChart = chartWithAxisLabels(buildLeakRateTrendChart(site), '', 'Lb lost/month');
-  const devChart = chartWithAxisLabels(buildDeviationTrendChart(site), '', 'SH deviation (°F)');
+  // Share one x-domain (spanning every session, recharge or checkup)
+  // across both charts below, so a checkup that's more recent than the
+  // last recharge doesn't leave the two charts' timelines misaligned —
+  // the top chart only ever plots recharges, so it wouldn't otherwise
+  // extend as far right as the bottom one, which plots everything.
+  const allSessionDates = (site.archive||[]).map(s => s.closedAt || s.id).filter(d => !isNaN(d));
+  const xDomain = allSessionDates.length ? {min: Math.min(...allSessionDates), max: Math.max(...allSessionDates)} : null;
+
+  const rateChart = chartWithAxisLabels(buildLeakRateTrendChart(site, xDomain), '', 'Lb lost/month');
+  const devChart = chartWithAxisLabels(buildDeviationTrendChart(site, xDomain), '', 'SH deviation (°F)');
   const forecast = computeLeakForecast(site);
   const rechargeCount = (site.archive||[]).filter(s=>s.type!=='checkup').length;
 
@@ -2276,13 +2662,39 @@ function renderSiteTrendPanel(){
   `;
 }
 
+let resumedFromArchive = null; // {originalIndex, snapshot} — lets Cancel restore the exact original
+
 async function onResumeSession(i){
   if(active) return;
   editingRowIdx = null;
   const session = archive[i];
-  active = { createdAt: session.id, type: session.type || 'recharge', baseline: session.baseline, steps: session.steps };
+  resumedFromArchive = { originalIndex: i, snapshot: JSON.parse(JSON.stringify(session)) };
+  active = {
+    createdAt: session.id,
+    createdAtStr: session.createdAtStr || tsStr(session.id),
+    type: session.type || 'recharge',
+    baseline: session.baseline,
+    steps: session.steps,
+    finalWeight: session.finalWeight,
+    finalWeightAt: session.finalWeightAt,
+    finalWeightAtStr: session.finalWeightAtStr
+  };
   archive.splice(i,1);
   expandedArchiveIdx = null;
+  await saveActive();
+  await saveArchive();
+  renderAll();
+}
+
+async function onCancelResume(){
+  if(!active || !resumedFromArchive) return;
+  const ok = await showConfirmModal('Discard any changes and put this session back exactly as it was, with its original close date?');
+  if(!ok) return;
+  const insertAt = Math.min(resumedFromArchive.originalIndex, archive.length);
+  archive.splice(insertAt, 0, resumedFromArchive.snapshot);
+  active = null;
+  resumedFromArchive = null;
+  editingRowIdx = null;
   await saveActive();
   await saveArchive();
   renderAll();
@@ -2439,6 +2851,10 @@ async function exportSite(){
 }
 
 function importSiteFile(file){
+  if(active){
+    showAlertModal('Close (or cancel) the current session before importing a site — an import could overwrite it.');
+    return;
+  }
   const reader = new FileReader();
   reader.onload = async (e) => {
     try{
