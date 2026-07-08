@@ -55,6 +55,11 @@
     letter-spacing:-.01em;
   }
   .subhead{color:var(--text-dim);font-size:14px;margin:0 0 18px;}
+  .wake-lock-toggle{
+    display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-dim);
+    cursor:pointer;user-select:none;
+  }
+  .wake-lock-toggle input{width:15px;height:15px;accent-color:var(--amber);cursor:pointer;}
 
   .safety{
     display:flex;gap:10px;align-items:flex-start;
@@ -272,8 +277,12 @@
 
   <div class="panel">
     <div class="eyebrow">Fixed-orifice · R-22</div>
-    <h1>Superheat Charging Assistant</h1>
-    <p class="subhead" style="margin-bottom:0;">Log each stabilized reading, get the next-step forecast — done.</p>
+    <h1>R-22 Superheat Charging Assistant</h1>
+    <p class="subhead" style="margin-bottom:12px;">Log each stabilized reading, get the next-step forecast — done.</p>
+    <label class="wake-lock-toggle">
+      <input type="checkbox" id="wakeLockToggle">
+      <span>Keep screen awake while this page is open</span>
+    </label>
   </div>
 
   <div class="safety">
@@ -670,6 +679,67 @@ async function probeStorage(){
   storageAvailable = false;
   const banner = document.getElementById('storageBanner');
   if(banner) banner.style.display = 'flex';
+}
+
+/* =========================================================
+   Screen Wake Lock — optional, user-toggled. Keeps the display
+   from sleeping while actively reading gauges mid-charge. The
+   OS releases the lock automatically when the page is
+   backgrounded (app switched, phone locked) regardless of what
+   we do; we just re-request it when the page becomes visible
+   again, if the person still has it turned on.
+   ========================================================= */
+let wakeLock = null;
+let wakeLockEnabled = false;
+
+async function requestWakeLock(){
+  if(!('wakeLock' in navigator)) return false;
+  try{
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+    return true;
+  }catch(e){
+    // commonly rejected if the tab isn't visible, or the OS/browser
+    // denies it outright (e.g. Low Power Mode) — not treated as fatal,
+    // the visibilitychange handler below will retry when appropriate.
+    wakeLock = null;
+    return false;
+  }
+}
+
+function releaseWakeLock(){
+  if(wakeLock){
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+}
+
+document.addEventListener('visibilitychange', async () => {
+  if(wakeLockEnabled && document.visibilityState === 'visible' && wakeLock === null){
+    await requestWakeLock();
+  }
+});
+
+function wireWakeLockToggle(){
+  const toggle = document.getElementById('wakeLockToggle');
+  if(!toggle) return;
+  toggle.onchange = async () => {
+    if(toggle.checked){
+      if(!('wakeLock' in navigator)){
+        await showAlertModal('Your browser doesn\'t support keeping the screen awake. On iPhone, this needs iOS 16.4+ and Safari (not the in-app browser some apps use).');
+        toggle.checked = false;
+        return;
+      }
+      const ok = await requestWakeLock();
+      wakeLockEnabled = true; // stays "on" even if this particular request failed (e.g. Low Power Mode) — will retry on visibility changes
+      if(!ok){
+        await showAlertModal('Could not keep the screen awake right now — this can happen in Low Power Mode. It\'ll keep trying automatically.');
+      }
+    } else {
+      wakeLockEnabled = false;
+      releaseWakeLock();
+    }
+  };
 }
 
 function currentSite(){ return sites.find(s => s.id === currentSiteId) || null; }
@@ -2906,6 +2976,7 @@ function wireBackupButtons(){
 (async function init(){
   const dismissBtn = document.getElementById('storageBannerDismiss');
   if(dismissBtn) dismissBtn.onclick = () => { document.getElementById('storageBanner').style.display = 'none'; };
+  wireWakeLockToggle();
   await probeStorage();
   await loadState();
   renderAll();
