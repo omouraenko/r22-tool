@@ -25,11 +25,11 @@ This tool stores everything locally in your browser (`localStorage`) — nothing
 
 ## Using tool on iPhone
 
-The tool was tested on iPhone. A couple additonal steps can help the tool to be more usable.
+The tool was tested on an iPhone. A few additional steps can improve its usability:
 
-- The page has a toggle at the top of the screen to keep screen from going to sleep while tool is in use.
-- Creating a shortcut on Home Screen for quick access.
-- Saving clipboard data into backup file using Shortcuts.
+- Enable the Keep Screen Awake toggle at the top of the page to prevent the screen from going to sleep while the tool is in use.
+- Create a Home Screen shortcut for quick access.
+- Use the iPhone Shortcuts app to save clipboard data to a backup file.
 
 ### Add to Home Screen
 
