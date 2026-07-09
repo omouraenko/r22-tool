@@ -1,8 +1,14 @@
 # R-22 Superheat Charging Assistant
 
-A single-file web tool for charging fixed-orifice R-22 systems using the superheat method. Log gauge readings as you go, and it tells you whether to add refrigerant or stop, tracks the trend across a session, and remembers history per site to estimates freon loss over time.
+[![R22 SH icon](icon.png)](https://omouraenko.github.io/r22-tool/)
+
+A web-based tool for charging fixed-orifice R-22 systems using the superheat method. Log gauge readings as you go, and the tool tells you whether to add refrigerant or stop, tracks charging trends throughout the session, and stores a history for each site to help estimate refrigerant loss over time.
+
+Use it directly in your browser—no installation required:
 
 **Live tool:** <https://omouraenko.github.io/r22-tool/>
+
+Alternatively, you can download the standalone `index.html` file from this repository and run it locally in any modern web browser.
 
 ## What it does
 
@@ -90,10 +96,6 @@ This is a personal tool, not a certified instrument or substitute for proper tra
 - **The math here is a planning aid, not a guarantee.** Target superheat, leak-rate forecasts, and "how much to add" estimates are all approximations based on the readings you enter — bad input (a slipped gauge, a stuck thermometer) gives a bad output, and the tool has no way to catch that.
 - **Handling R-22 is regulated.** In the US, purchasing or working with R-22 requires EPA Section 608 certification. This tool doesn't check for or substitute for that — it assumes the person using it is already qualified to do the work.
 - No warranty of any kind. Verify readings against your own judgment and training before acting on anything this tool tells you.
-
-## Running it yourself
-
-It's one self-contained HTML file — no build step, no dependencies, no backend. To update the live version, replace `index.html` in this repo with the new file and commit.
 
 ## License
 
