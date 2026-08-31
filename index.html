@@ -36,6 +36,13 @@
   }
   *{box-sizing:border-box;}
   html{background:#14171A;background:var(--bg);height:100%;}
+  /* iOS Safari auto-boosts the rendered size of longer text blocks (like
+     .subhead paragraphs) independent of the font-size set below, most
+     noticeably in landscape — short titles are left alone, so a
+     paragraph can end up looking much larger than a heading next to it
+     despite a smaller CSS font-size. This opts every element out of
+     that heuristic so font-size is always what actually renders. */
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
   html,body{margin:0;padding:0;color:var(--text);}
   body{
     background:#14171A;
