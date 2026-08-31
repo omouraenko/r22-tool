@@ -1,1 +1,2 @@
 *.json
+!model/demo_data.json

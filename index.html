@@ -247,6 +247,11 @@
   @media (max-width:520px){
     .gauge-row{flex-direction:column;}
     .readout-grid{grid-template-columns:1fr 1fr;width:100%;}
+    /* .field-grid's 150px-per-column floor doesn't fit inside body+panel
+       padding on ~375px-wide phones (iPhone SE/mini) — 2 columns at 150px
+       plus the 12px gap (312px) exceeds the ~299px left after padding,
+       overflowing the viewport and clipping inputs on both edges. */
+    .field-grid{grid-template-columns:repeat(auto-fit,minmax(130px,1fr));}
   }
 
   /* ---- Custom modal (replaces native confirm/alert — blocked in sandboxed iframes) ---- */
@@ -327,11 +332,11 @@
   <!-- SITE PANEL -->
   <div id="sitePanel" class="panel"></div>
 
+  <!-- ENVIRONMENTAL PARAMETERS PANEL (shared by checkup + recharge) -->
+  <div id="envPanel" class="panel" style="display:none;"></div>
+
   <!-- BASELINE PANEL -->
   <div id="baselinePanel" class="panel"></div>
-
-  <!-- AMBIENT RECHECK PANEL -->
-  <div id="ambientPanel" class="panel" style="display:none;"></div>
 
   <!-- STEP ENTRY PANEL -->
   <div id="stepPanel" class="panel" style="display:none;"></div>
@@ -345,14 +350,20 @@
   <!-- HISTORY PANEL -->
   <div id="historyPanel" class="panel" style="display:none;"></div>
 
+  <!-- SESSION ACTIONS PANEL (Close / Switch to Recharge / Cancel resume) -->
+  <div id="sessionActionsPanel" class="panel" style="display:none;"></div>
+
   <!-- ARCHIVE PANEL -->
   <div id="archivePanel" class="panel"></div>
 
   <!-- SITE TREND PANEL -->
   <div id="siteTrendPanel" class="panel" style="display:none;"></div>
 
+  <!-- HOUSE MODEL PANEL (historical atan+ODDB fit across all archived sessions) -->
+  <div id="houseModelPanel" class="panel" style="display:none;"></div>
+
   <!-- BACKUP/RESTORE PANEL (whole dataset, all sites) -->
-  <div class="panel">
+  <div id="backupPanel" class="panel">
     <div class="panel-head">
       <div class="panel-title">Backup</div>
       <span class="tag">All sites · local file</span>
@@ -409,41 +420,9 @@ function psigFromSatTemp(tempF){
   return null;
 }
 
-/* =========================================================
-   TLOW modeling — predicting what LOW-side pressure will hit
-   target SH.
-
-   The naive approach (assume SLT stays fixed, solve VSAT from
-   the PT table) only works near target: far from it, SLT
-   itself changes a lot as charge is added, not just VSAT, so
-   holding it fixed badly overshoots. A single straight-line
-   extrapolation of SH-vs-pressure has its own failure mode —
-   the SH-vs-charge relationship isn't linear (it's often much
-   more sensitive near correct charge than far from it), so a
-   secant slope measured from two readings that span into that
-   more-sensitive region can still overshoot.
-
-   Instead, this models the genuinely unknown, system-specific
-   relationship — how SLT itself evolves with LOW pressure —
-   from the session's own observed (LOW, SLT) points, and
-   combines that with the *exact*, table-based VSAT(LOW)
-   relationship (nothing to model there, it's known physics) to
-   solve for the pressure where predicted SLT − VSAT(LOW) =
-   target SH. The model gets richer as more points arrive:
-   one point can only assume a value for SLT, two points can
-   draw a line through them, three or more can fit a curve that
-   captures how the rate itself is changing.
-   ========================================================= */
-
-function fitLinearFn(p1, p2){
-  if(p1.x===p2.x) return null;
-  const a = (p2.y-p1.y)/(p2.x-p1.x);
-  const b = p1.y - a*p1.x;
-  return x => a*x + b;
-}
-
 // Generic Nelder-Mead simplex optimizer — minimizes f(params) with no
-// derivatives needed. Used to fit the atan model below, which has no
+// derivatives needed. Used by the house-specific target/path model
+// further below (see HOUSE-SPECIFIC HISTORICAL MODEL), which has no
 // closed-form solution the way linear/quadratic regression does.
 function nelderMead(f, initialSimplex, maxIter){
   const n = initialSimplex[0].length;
@@ -476,85 +455,6 @@ function nelderMead(f, initialSimplex, maxIter){
   return simplex;
 }
 
-// SLT-vs-LOW model used once 3+ readings exist: SLT(x) = A - k*(atan(m*(x-x0)) + pi/2).
-// Since (atan(...) + pi/2) ranges from 0 to pi and is always >= 0, this
-// curve is monotonically decreasing by construction and flattens at both
-// ends — it physically cannot bow upward between two points the way an
-// unconstrained polynomial can. All four parameters (including the upper
-// plateau A) are fit freely to the session's own observed points via
-// Nelder-Mead: A is NOT tied to the assumed-healthy-SLT cap, because real
-// early-session readings can legitimately run well above that cap (that's
-// what "far from target" means) — forcing the curve to respect the cap
-// would make it unable to fit that real data at all. The cap is applied
-// separately, as a ceiling on the final solved pressure, wherever this
-// model's result is used.
-function fitAtanModel(points){
-  if(new Set(points.map(p=>p.x)).size < 3) return null;
-  const xs = points.map(p=>p.x), ys = points.map(p=>p.y);
-  const xMin = Math.min(...xs), xMax = Math.max(...xs), xSpan = (xMax-xMin) || 10;
-  const yMin = Math.min(...ys), yMax = Math.max(...ys);
-  const HALF_PI = Math.PI/2;
-
-  const predict = ([A,k,m,x0], x) => A - k*(Math.atan(m*(x-x0)) + HALF_PI);
-  const cost = ([A,k,m,x0]) => {
-    if(k<=0 || m<=0) return Infinity; // enforce the monotonic-decreasing shape
-    let sse = 0;
-    for(const p of points){ const d = predict([A,k,m,x0], p.x) - p.y; sse += d*d; }
-    return sse;
-  };
-
-  const A0 = yMax; // rough guess: upper plateau near the highest observed SLT
-  const k0 = Math.max(0.5, (yMax-yMin)/Math.PI);
-  const m0 = 4/xSpan;
-  const x0_0 = xs[Math.floor(xs.length/2)];
-  const initialSimplex = [
-    [A0,   k0,     m0,     x0_0],
-    [A0+2, k0,     m0,     x0_0],
-    [A0,   k0*1.4, m0,     x0_0],
-    [A0,   k0,     m0*1.6, x0_0],
-    [A0,   k0,     m0,     x0_0 + xSpan*0.25]
-  ];
-  const result = nelderMead(cost, initialSimplex, 600);
-  const best = result[0];
-  if(!isFinite(cost(best))) return null;
-  return x => predict(best, x);
-}
-
-// Numerically finds the LOW psig where sltModel(psig) - VSAT(psig) equals
-// targetSH. Searches outward from the current reading in the direction
-// implied by its own SH error (more pressure needed if SH is high, less
-// if it's already below target) and returns the *nearest* root in that
-// direction. This matters because a quadratic fit through only three
-// points can be unstable outside the region it was fit on — scanning the
-// full range from zero can find a spurious, physically meaningless root
-// (e.g. a much lower pressure) before reaching the real one; anchoring
-// the search at the current point and walking toward the gap avoids that.
-function solveLowForTargetSH(sltModel, targetSH, currentPsig, searchSpan){
-  const step = 0.5;
-  const f = p => {
-    const vsat = satTempFromPsig(p);
-    if(vsat===null) return null;
-    return sltModel(p) - vsat - targetSH;
-  };
-  const f0 = f(currentPsig);
-  if(f0===null) return null;
-  if(f0===0) return currentPsig;
-  const dir = f0>0 ? 1 : -1; // f0>0: SH too high, need MORE pressure. f0<0: need less.
-  let prevP = currentPsig, prevV = f0;
-  for(let d=step; d<=searchSpan; d+=step){
-    const p = currentPsig + dir*d;
-    if(p<0 || p>400) break;
-    const v = f(p);
-    if(prevV!==null && v!==null && ((prevV<=0 && v>=0) || (prevV>=0 && v<=0))){
-      if(v===prevV) return p;
-      const frac = prevV/(prevV-v);
-      return prevP + frac*(p-prevP);
-    }
-    prevP = p; prevV = v;
-  }
-  return null;
-}
-
 /* =========================================================
    Storage helpers — multi-site model
    Each site: {id, name, refrigerant, meteringType, nameplateOz, tons,
@@ -569,7 +469,40 @@ let sites = [];
 let currentSiteId = null;
 let active = null;      // convenience reference to currentSite().active
 let archive = [];       // convenience reference to currentSite().archive
-let baselinePrefill = null; // {outdoorDB, indoorWB} carried in when starting a recharge from a checkup's "Start a recharge session" suggestion
+// Whether the Site panel's full management view (selector, info strip,
+// New/Import/Export/Delete, Edit) is expanded. Collapsed to a one-line
+// summary by default, and always collapsed (no Update button at all)
+// while a session is active — site config can't change mid-session.
+let siteInfoOpen = false;
+// House model and Site trend are diagnostic/reference panels, collapsed
+// to just a header by default so they don't crowd the page — expanded
+// on demand via their own "Show model"/"Show trend" button.
+let houseModelOpen = false;
+let siteTrendOpen = false;
+// Environmental parameters (ODDB/IDWB/IDDB/RH) entered before a session
+// exists yet — step 1 of starting a session. Holds the last-entered
+// values purely for pre-filling the form; it is NOT cleared by Cancel, so
+// backing out of step 2 doesn't force re-typing ODDB/IDWB from scratch.
+let pendingEnv = null;
+// Whether pendingEnv has actually been confirmed ("Start Session" pressed
+// in the Environmental Parameters panel). This — not pendingEnv itself —
+// is what gates the baseline panel's "record first reading" form (step 2)
+// and sessionInProgress(). Cancelling step 2 resets this to false without
+// touching pendingEnv's values.
+let pendingEnvConfirmed = false;
+// {lowPsig, highPsig, suctionTemp, liquidTemp} carried over into step 2's
+// fields only when switching a checkup straight into a new recharge (the
+// checkup's last reading becomes the recharge's first reading).
+let pendingReadingPrefill = null;
+// Id of the checkup being switched away from, set alongside
+// pendingReadingPrefill and copied onto the new recharge session as
+// switchedFromCheckupId once it's started (see onStartSession). Lets
+// loadHouseModelPoints/collectDeviationTrendBySite recognize that the checkup's
+// final reading and the recharge's baseline are the same physical
+// reading logged twice, and only count it once — even if the prefilled
+// fields get edited before the recharge actually starts, since this
+// tracks the session relationship directly rather than comparing values.
+let pendingSwitchedFromCheckupId = null;
 let timerInterval = null;
 let timerEndsAt = null;
 
@@ -750,14 +683,15 @@ function wireWakeLockToggle(){
 
 function currentSite(){ return sites.find(s => s.id === currentSiteId) || null; }
 
-// The "assumed max healthy SLT" cap used for the rough first-reading TLOW
-// estimate — a per-site setting (different equipment/climates may
-// legitimately run higher or lower), defaulting to 55°F if the site
-// hasn't customized it.
-function sltCapFor(site){
-  return (site && site.sltCap!==undefined && site.sltCap!=='' && !isNaN(site.sltCap)) ? Number(site.sltCap) : 55;
-}
-function currentSltCap(){ return sltCapFor(currentSite()); }
+// Broader than `active`: true from the moment environmental parameters
+// are confirmed (pendingEnvConfirmed, before checkup/recharge has
+// technically started in the data model) through the end of the session.
+// Once you've pressed "Start Session" you're committed to recording data,
+// so cross-session reference panels (Archive, Site Trend, House Model,
+// Backup) and the Site panel's editable controls hide/collapse from this
+// point on, not just once `active` exists. Cancelling step 2 sets
+// pendingEnvConfirmed back to false, which un-hides everything again.
+function sessionInProgress(){ return !!active || pendingEnvConfirmed; }
 
 function newSiteId(){ return 'site_' + Date.now() + '_' + Math.random().toString(36).slice(2,7); }
 
@@ -831,10 +765,15 @@ async function saveArchive(){
 /* =========================================================
    Formatting helpers
    ========================================================= */
-const fmt1 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*10)/10).toFixed(1);
-const numOrEmpty = v => (v===null||v===undefined||isNaN(v)) ? '' : (Math.round(v*10)/10).toString();
-const fmt2 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
-const fmt3 = v => (v===null||v===undefined||isNaN(v)) ? '—' : (Math.round(v*1000)/1000).toFixed(3);
+// isNaN('') is false (an empty string coerces to 0), so every one of
+// these needs the explicit v==='' check — otherwise a never-entered
+// optional field (stored as the input's raw '' value, e.g. LLT left
+// blank, then carried forward by resolveFields) renders as "0"/"0.0"
+// instead of staying blank.
+const fmt1 = v => (v===null||v===undefined||v===''||isNaN(v)) ? '—' : (Math.round(v*10)/10).toFixed(1);
+const numOrEmpty = v => (v===null||v===undefined||v===''||isNaN(v)) ? '' : (Math.round(v*10)/10).toString();
+const fmt2 = v => (v===null||v===undefined||v===''||isNaN(v)) ? '—' : (Math.round(v*100)/100).toFixed(2);
+const fmt3 = v => (v===null||v===undefined||v===''||isNaN(v)) ? '—' : (Math.round(v*1000)/1000).toFixed(3);
 const lbOz = oz => (oz===null||oz===undefined||isNaN(oz)) ? '—' : `${fmt2(oz/16)} lb (${fmt1(oz)} oz)`;
 const lbOnly = oz => (oz===null||oz===undefined||isNaN(oz)) ? '—' : `${fmt2(oz/16)} lb`;
 // Same as lbOnly, but treats a value that displays as "0.00 lb" the same
@@ -857,7 +796,7 @@ function collectHistoricalRatePoints(site){
   const points = [];
   (site.archive || []).forEach(session => {
     if(session.type === 'checkup') return;
-    const rows = resolveFields(session.baseline, session.steps, {sltCap: sltCapFor(site)});
+    const rows = resolveFields(session.baseline, session.steps, {});
     rows.forEach(r => {
       if(r.shDropPerOz!==null && !isNaN(r.shDropPerOz) && !isNaN(r.outdoorDB)){
         points.push({x: r.outdoorDB, y: r.shDropPerOz});
@@ -922,7 +861,6 @@ function resolveFields(baseline, steps, opts={}){
 
   const all = [{...baseline, isBaseline:true}, ...steps];
   let prevWeight = null, prevActualSH = null, prevTotalOz = 0;
-  let lowSltHistory = []; // {x:lowPsig, y:suctionTemp} from prior valid rows, most recent last
 
   // Auto-detect the per-step weight mode from the FIRST reading on the
   // jug(+hoses) basis — that's baseline.baseWeight if it was given
@@ -943,6 +881,12 @@ function resolveFields(baseline, steps, opts={}){
     incrementalWeighMode = Number(firstChainReading) === 0;
   }
   let lastCumulativeOz = null;
+
+  // TLOW comes from the house-specific target/path model (pooled across
+  // every archived session at this site — both recharge and checkup) —
+  // see the HOUSE-SPECIFIC HISTORICAL MODEL block above. Computed once
+  // per call, not per row.
+  const houseModel = opts.houseSite ? fitHouseModel(loadHouseModelPoints(opts.houseSite), opts.houseSite.id) : null;
 
   all.forEach((s, idx) => {
     const outdoorDB = (s.outdoorDB!==undefined && s.outdoorDB!=='') ? Number(s.outdoorDB) : prevOutdoorDB;
@@ -974,51 +918,28 @@ function resolveFields(baseline, steps, opts={}){
 
     const targetVSAT = (targetSH!==null && !isNaN(suctionTemp)) ? suctionTemp - targetSH : null;
 
-    // TLOW: model how SLT itself evolves with LOW pressure from this
-    // session's own observed points, and combine that with the exact
-    // PT-table VSAT(LOW) relationship — see the fitting helpers above for
-    // the full reasoning. The conservative capped-SLT estimate (assume a
-    // properly-running system's SLT won't realistically run above 55°F)
-    // is always available as a ceiling and is used as-is with only one
-    // point; with two or more points it still bounds the fitted model's
-    // answer from above, as a backstop against an unstable extrapolation
-    // (e.g. a near-flat secant or quadratic through noisy points)
-    // recommending more pressure than that conservative assumption would.
-    let targetLowPsig = null, targetLowPsigSource = null;
+    // TLOW: the target model gives a closed-form VSAT_target as soon as
+    // >=1 accepted recharge endpoint exists (no root-finding needed), for
+    // both recharge and checkup sessions. With zero accepted endpoints
+    // (true cold start), rule-based guidance from the current reading
+    // takes over instead of a numeric TLOW — see computeBootstrapGuidance()
+    // above, which fills the gap r22_charge_model.py itself leaves
+    // unhandled (it just raises).
+    let targetLowPsig = null, targetLowPsigSource = null, bootstrapGuidance = null;
+    let targetVsatF = null, targetSltF = null;
     const currentLowSltPoint = (!isNaN(lowPsig) && !isNaN(suctionTemp)) ? {x:lowPsig, y:suctionTemp} : null;
-    const fitPoints = currentLowSltPoint ? [...lowSltHistory, currentLowSltPoint] : [];
+    const haveAmbient = targetSH!==null && !isNaN(outdoorDB) && !isNaN(indoorWB);
 
-    if(targetSH!==null && currentLowSltPoint){
-      const effectiveCap = opts.sltCap!==undefined ? opts.sltCap : 55;
-      const cappedSuctionTemp = Math.min(suctionTemp, effectiveCap);
-      const ceilingPsig = psigFromSatTemp(cappedSuctionTemp - targetSH);
-
-      if(fitPoints.length>=3){
-        const model = fitAtanModel(fitPoints);
-        const solved = model ? solveLowForTargetSH(model, targetSH, lowPsig, 150) : null;
-        if(solved!==null){
-          targetLowPsig = ceilingPsig!==null ? Math.min(solved, ceilingPsig) : solved;
-          targetLowPsigSource = 'atan';
-        } else {
-          targetLowPsig = ceilingPsig;
-          targetLowPsigSource = 'theoretical';
-        }
-      } else if(fitPoints.length===2){
-        const model = fitLinearFn(fitPoints[0], fitPoints[1]);
-        const solved = model ? solveLowForTargetSH(model, targetSH, lowPsig, 150) : null;
-        if(solved!==null){
-          targetLowPsig = ceilingPsig!==null ? Math.min(solved, ceilingPsig) : solved;
-          targetLowPsigSource = 'linear';
-        } else {
-          targetLowPsig = ceilingPsig;
-          targetLowPsigSource = 'theoretical';
-        }
-      } else {
-        targetLowPsig = ceilingPsig;
-        targetLowPsigSource = 'theoretical';
-      }
+    if(houseModel && houseModel.ok && haveAmbient){
+      const tv = targetValues(indoorWB, outdoorDB, houseModel);
+      targetLowPsig = tv.lowTargetPsig;
+      targetVsatF = tv.vsatTargetF;
+      targetSltF = tv.sltTargetF;
+      targetLowPsigSource = houseModel.target.state;
+    } else if(houseModel && !houseModel.ok && currentLowSltPoint && haveAmbient){
+      bootstrapGuidance = computeBootstrapGuidance(lowPsig, suctionTemp, outdoorDB, indoorWB);
+      targetLowPsigSource = 'bootstrap';
     }
-    if(currentLowSltPoint) lowSltHistory.push(currentLowSltPoint);
 
     let stepOz = null, totalOz;
     if(idx===0){
@@ -1037,7 +958,12 @@ function resolveFields(baseline, steps, opts={}){
         totalOz = cumulativeOz;
         lastCumulativeOz = cumulativeOz;
       } else {
-        totalOz = null;
+        // No weight taken this step (e.g. a pressure-only recheck) — the
+        // running total hasn't changed, so carry it forward rather than
+        // treating it as unknown (which would coerce to 0 downstream, in
+        // the "estimated total oz needed" calc, and wipe out everything
+        // added so far).
+        totalOz = prevTotalOz;
       }
     } else if(!isNaN(weight)){
       if(prevWeight!==null){
@@ -1050,7 +976,9 @@ function resolveFields(baseline, steps, opts={}){
         totalOz = 0;
       }
     } else {
-      totalOz = null;
+      // No weight taken this step — carry the running total forward (see
+      // comment above).
+      totalOz = prevTotalOz;
     }
 
     let deltaSH = null, shDropPerOz = null;
@@ -1086,7 +1014,7 @@ function resolveFields(baseline, steps, opts={}){
       weight, outdoorDB, indoorWB, liquidTemp, indoorDB, indoorRH,
       lowPsig, highPsig, suctionTemp,
       vsat, lsat, actualSH, targetSH, shError, condensingSplit, subcooling,
-      targetVSAT, targetLowPsig, targetLowPsigSource,
+      targetVSAT, targetLowPsig, targetLowPsigSource, targetVsatF, targetSltF, bootstrapGuidance,
       stepOz, totalOz, shDropPerOz, ozPerDegree, lbPerDegree,
       estRate, estRateSource, estRatePrediction, estTotalOz, estRemainingOz,
       notes: s.notes || ''
@@ -1124,14 +1052,48 @@ function recommendation(row, sessionType){
     return {level:'warn', oz:0, title:'Running rich', sub:'SH is below target — check airflow/load rather than assuming overcharge from a single checkup reading.'};
   }
 
-  let oz;
+  // TLOW/VSAT/SLT targets (from the house model, or bootstrap guidance
+  // before enough history exists) are what actually drives charging now —
+  // watch the gauge and thermometer against these, not an oz count.
+  // Exceptions, where the numeric target isn't trustworthy enough to
+  // assert as a pressure to chase (still fine as an FYI elsewhere,
+  // clearly labeled "rough"/"default"/"unconfirmed"):
+  //  - 'one-endpoint': a/b (environmental slope) are forced to 0 — the
+  //    target is that one reading's VSAT reused verbatim, with no way to
+  //    correct for today's IDWB/ODDB being different.
+  //  - 'default-model': R itself is borrowed from another site — this
+  //    house hasn't confirmed a correct-charge reading of its own yet.
+  // 'one-endpoint-default' and 'provisional-default-assisted' are NOT
+  // suppressed: they still have a real local R and at least a physically
+  // motivated (if borrowed) slope on the axis local data can't yet
+  // speak to, which is strictly better than assuming zero sensitivity.
+  // Gi (shError) itself is unaffected by any of this — it's always
+  // computed from today's own formula-based target superheat — so the
+  // add/stop/warn thresholds below stay reliable regardless.
+  const untrustedTarget = row.targetLowPsigSource === 'one-endpoint' || row.targetLowPsigSource === 'default-model';
+  const targetPhrase = (row.targetLowPsig!=null && !untrustedTarget)
+    ? [`LOW ≈ ${Math.round(row.targetLowPsig)} psig`,
+       row.targetVsatF!=null ? `VSAT ≈ ${fmt1(row.targetVsatF)}°F` : null,
+       row.targetSltF!=null ? `SLT ≈ ${fmt1(row.targetSltF)}°F` : null]
+        .filter(Boolean).join(' · ')
+    : null;
+  const untrustedReason = row.targetLowPsigSource === 'default-model'
+    ? 'No recharge has finished in range at this site yet, so this house\'s own target is still unknown — the only estimate available is borrowed from another site\'s model as a rough starting point.'
+    : 'Only one past recharge on record, under different outdoor/indoor conditions than today — the exact LOW/VSAT can\'t be pinned down yet.';
+  const targetTitle = targetPhrase ? `Target: ${targetPhrase}`
+    : (row.bootstrapGuidance ? row.bootstrapGuidance.instruction
+       : (untrustedTarget ? 'Add in small steps — watch SH deviation, not a fixed pressure' : 'Add refrigerant, stabilize, remeasure'));
+  const addInstruction = targetPhrase
+    ? 'Add refrigerant toward that target, stabilize 5–10 min, remeasure.'
+    : (untrustedTarget
+        ? `${untrustedReason} Add a little at a time, stabilize 5–10 min, and remeasure; stop once SH deviation is close to 0, regardless of the pressure reading.`
+        : 'Add refrigerant, stabilize 5–10 min, remeasure.');
+
   if(err>10){
-    oz = haveRate ? Math.min(4, Math.max(1, Math.round(row.estRemainingOz))) : 4;
-    return {level:'add', oz, title:`Add ~${lbOz(oz)} vapor, stabilize 5–10 min, remeasure`, sub:`SH is ${fmt1(err)}°F above target — running low side.${sourceNote}`};
+    return {level:'add', title: targetTitle, sub:`SH is ${fmt1(err)}°F above target — running low side. ${addInstruction}`};
   }
   if(err>5){
-    oz = haveRate ? Math.min(2, Math.max(1, Math.round(row.estRemainingOz))) : 2;
-    return {level:'add', oz, title:`Add ~${lbOz(oz)} vapor, stabilize 5–10 min, remeasure`, sub:`SH is ${fmt1(err)}°F above target.${sourceNote}`};
+    return {level:'add', title: targetTitle, sub:`SH is ${fmt1(err)}°F above target. ${addInstruction}`};
   }
   if(err>=-3){
     return {level:'stop', oz:0, title:'Near target — stop and verify', sub:'Let the system stabilize fully, then recheck before closing up.'};
@@ -1215,6 +1177,20 @@ function buildSplitGauge(split){
   });
 }
 
+// Point marker shapes for buildLineChart series — 'circle' (default),
+// 'plus', or 'x'. Lets a chart encode a second dimension (e.g. point
+// classification) alongside a series' own color.
+function svgMarker(shape, cx, cy, color){
+  const x = cx.toFixed(1), y = cy.toFixed(1);
+  if(shape==='plus'){
+    return `<path d="M ${(cx-4).toFixed(1)} ${y} L ${(cx+4).toFixed(1)} ${y} M ${x} ${(cy-4).toFixed(1)} L ${x} ${(cy+4).toFixed(1)}" stroke="${color}" stroke-width="1.6" stroke-linecap="round"/>`;
+  }
+  if(shape==='x'){
+    return `<path d="M ${(cx-3.2).toFixed(1)} ${(cy-3.2).toFixed(1)} L ${(cx+3.2).toFixed(1)} ${(cy+3.2).toFixed(1)} M ${(cx-3.2).toFixed(1)} ${(cy+3.2).toFixed(1)} L ${(cx+3.2).toFixed(1)} ${(cy-3.2).toFixed(1)}" stroke="${color}" stroke-width="1.6" stroke-linecap="round"/>`;
+  }
+  return `<circle cx="${x}" cy="${y}" r="3" fill="${color}"/>`;
+}
+
 /* =========================================================
    Generic line chart (used for the SH deviation trend and
    the actual-vs-target SH trend)
@@ -1230,6 +1206,36 @@ function buildLineChart(seriesList, opts={}){
   let xMin = opts.xMin!==undefined ? opts.xMin : Math.min(...allPoints.map(p=>p.x));
   let xMax = opts.xMax!==undefined ? opts.xMax : Math.max(...allPoints.map(p=>p.x));
   if(xMin === xMax){ xMax = xMin + 1; }
+
+  // Equidistant x-axis ticks, independent of where the actual data happens
+  // to fall — pick a "nice" step so a narrow range still gets several
+  // ticks and a wide one doesn't get crowded, then snap the plotted domain
+  // out to that same grid so every tick lands inside the visible axis (not
+  // clipped past the left/right edge). Two flavors: whole numbers (for
+  // measurement axes like VSAT/psig) or calendar-ish day/week/month/year
+  // steps (for date axes, where two sessions a few days apart would
+  // otherwise put two data-driven ticks on top of each other).
+  let xTickStep = null;
+  if(opts.xIntegerTicks){
+    const targetCount = 6;
+    const rawStep = (xMax-xMin)/targetCount || 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const norm = rawStep/mag;
+    const niceNorm = norm<=1 ? 1 : (norm<=2 ? 2 : (norm<=5 ? 5 : 10));
+    xTickStep = Math.max(1, Math.round(niceNorm*mag));
+  } else if(opts.xDateTicks){
+    const DAY_MS = 24*60*60*1000;
+    const NICE_DAY_STEPS = [1,2,3,5,7,14,21,30,60,90,120,182,365,548,730,1095,1460,1825,2555,3650,5475,7300];
+    const targetCount = 6;
+    const rawStepDays = ((xMax-xMin)/targetCount || 1) / DAY_MS;
+    const stepDays = NICE_DAY_STEPS.find(d => d>=rawStepDays) || NICE_DAY_STEPS[NICE_DAY_STEPS.length-1];
+    xTickStep = stepDays*DAY_MS;
+  }
+  if(xTickStep){
+    xMin = Math.floor(xMin/xTickStep)*xTickStep;
+    xMax = Math.ceil(xMax/xTickStep)*xTickStep;
+    if(xMin===xMax) xMax = xMin + xTickStep;
+  }
 
   let yMin, yMax;
   if(opts.yMin!==undefined && opts.yMax!==undefined){
@@ -1268,6 +1274,12 @@ function buildLineChart(seriesList, opts={}){
     refLineHtml = `<line x1="${M.l}" y1="${sy(opts.refLine).toFixed(1)}" x2="${W-M.r}" y2="${sy(opts.refLine).toFixed(1)}" stroke="var(--amber)" stroke-width="1" stroke-dasharray="3,3"/>`;
   }
 
+  let vLineHtml = '';
+  if(opts.vLine!==undefined && opts.vLine!==null && opts.vLine>=xMin && opts.vLine<=xMax){
+    const vx = sx(opts.vLine).toFixed(1);
+    vLineHtml = `<line x1="${vx}" y1="${M.t}" x2="${vx}" y2="${M.t+plotH}" stroke="var(--low)" stroke-width="1" stroke-dasharray="3,3"/>`;
+  }
+
   // y-axis ticks (4 steps)
   let yTicks = '';
   const ySteps = 4;
@@ -1281,15 +1293,10 @@ function buildLineChart(seriesList, opts={}){
       <text x="${M.l-6}" y="${(y+3).toFixed(1)}" text-anchor="end" class="chart-svg-text">${fmtYTick(v)}</text>`;
   }
 
-  // x-axis ticks based on actual x values present (thin out if crowded).
-  // Uses opts.xTickPoints if given (e.g. just the real readings) instead
-  // of every series' points, since a densely-sampled fit curve would
-  // otherwise dominate the tick candidates with arbitrary values.
-  const xUnique = [...new Set((opts.xTickPoints || allPoints).map(p=>p.x))].sort((a,b)=>a-b);
-  const maxTicks = 6;
-  const xTickStride = Math.max(1, Math.ceil(xUnique.length / maxTicks));
   const xLabelFn = opts.xLabelFn || fmt1;
-  let xTicks = xUnique.filter((x,i) => i % xTickStride === 0 || i===xUnique.length-1).map(x => {
+  const xTickValues = [];
+  for(let v=xMin; v<=xMax+xTickStep*1e-6; v+=xTickStep) xTickValues.push(Math.round(v));
+  const xTicks = xTickValues.map(x => {
     const sx_ = sx(x);
     return `<text x="${sx_.toFixed(1)}" y="${H-M.b+16}" text-anchor="middle" class="chart-svg-text">${xLabelFn(x)}</text>`;
   }).join('');
@@ -1303,7 +1310,7 @@ function buildLineChart(seriesList, opts={}){
       const dash = s.dashed ? 'stroke-dasharray="5,4"' : '';
       line = `<path d="${path}" stroke="${s.color}" stroke-width="2" fill="none" ${dash}/>`;
     }
-    const dots = s.noDots ? '' : pts.map(p => `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3" fill="${s.color}"/>`).join('');
+    const dots = s.noDots ? '' : pts.map(p => svgMarker(s.shape, sx(p.x), sy(p.y), s.color)).join('');
     return line + dots;
   }).join('');
 
@@ -1312,12 +1319,11 @@ function buildLineChart(seriesList, opts={}){
     ${yTicks}
     ${zeroHtml}
     ${refLineHtml}
+    ${vLineHtml}
     ${xTicks}
     ${seriesHtml}
   </svg>`;
 }
-
-const psigTickFn = x => `${Math.round(x)}`;
 
 // Wraps a chart's SVG with small axis-label captions (y rotated on the
 // left, x centered underneath) since the compact SVG margins don't have
@@ -1333,31 +1339,64 @@ function chartWithAxisLabels(svgHtml, xLabel, yLabel){
   </div>`;
 }
 
-function buildDeviationChart(rows){
-  const points = rows.filter(r => r.shError!==null && !isNaN(r.lowPsig)).map(r => ({x:r.lowPsig, y:r.shError}));
+// Builds a .chart-legend block from {label, color, dashed?} items — used
+// where a chart's line/dot colors aren't self-explanatory (e.g. one color
+// per recharge session, dashed target-reference lines).
+function buildChartLegendHtml(items){
+  if(!items || !items.length) return '';
+  return `<div class="chart-legend">${items.map(it => {
+    if(it.shape){
+      const icon = `<svg width="14" height="14" viewBox="0 0 14 14" style="vertical-align:middle;">${svgMarker(it.shape, 7, 7, it.color)}</svg>`;
+      return `<span class="legend-item">${icon}${it.label}</span>`;
+    }
+    const swatchStyle = it.dashed
+      ? `background-image:repeating-linear-gradient(to right, ${it.color} 0 4px, transparent 4px 7px);background-color:transparent;`
+      : `background:${it.color};`;
+    return `<span class="legend-item"><span class="legend-swatch" style="${swatchStyle}"></span>${it.label}</span>`;
+  }).join('')}</div>`;
+}
+
+// Overlay curve for buildDeviationChart, built from the target/path
+// model at this session's current ambient conditions. Returns null when
+// there's no path model yet (cold start, or a target with too few points
+// to fit B,C,W) — nothing to draw in that case.
+function fittedLowSltCurve(rows, houseModel){
+  const lastRow = rows[rows.length-1];
+  if(!houseModel || !houseModel.ok || !houseModel.path || !houseModel.path.available) return null;
+  if(isNaN(lastRow.outdoorDB) || isNaN(lastRow.indoorWB)) return null;
+
+  const sht = lastRow.targetSH;
+  const curvePts = [];
+  for(let i=0;i<=32;i++){
+    const v = VSAT_MIN + (VSAT_MAX-VSAT_MIN)*i/32;
+    const low = psigFromSatTemp(v);
+    if(low===null) continue;
+    const gi = predictedGi(v, lastRow.indoorWB, lastRow.outdoorDB, houseModel);
+    curvePts.push({x: low, y: v + sht + gi});
+  }
+  const label = {'endpoint-regression':'house model', 'provisional-path-assisted':'house model (provisional)', 'provisional-default-assisted':'house model (provisional)', 'one-endpoint':'house model (one endpoint)', 'one-endpoint-default':'house model (one endpoint)', 'default-model':'house model (default, unconfirmed)'}[houseModel.target.state] || 'house model';
+  return { label, color:'var(--amber)', points:curvePts, noDots:true };
+}
+
+function buildDeviationChart(rows, houseModel){
+  // Same domain restriction as the House model's Gi=H(Vn) chart — a
+  // reading below VSAT_MIN is outside the model's normal range (possible
+  // freeze/transient regime) and isn't meaningful to plot here either.
+  const points = rows.filter(r => r.shError!==null && !isNaN(r.lowPsig) && r.vsat!==null && r.vsat>=VSAT_MIN).map(r => ({x:r.lowPsig, y:r.shError}));
   if(points.length===0) return null;
 
-  // Overlay the same LOW-vs-SLT fit TLOW is solved from, converted into a
-  // predicted-deviation curve (predicted SLT − VSAT(LOW) − target SH) —
-  // so this chart visually explains the number driving TLOW, rather than
-  // just connecting the actual readings with straight segments.
-  const fitPoints = rows.filter(r => !isNaN(r.lowPsig) && !isNaN(r.suctionTemp)).map(r => ({x:r.lowPsig, y:r.suctionTemp}));
+  // Overlay the same path curve TLOW is solved from, converted into a
+  // predicted-deviation curve — so this chart visually explains the
+  // number driving TLOW, rather than just connecting readings with
+  // straight segments.
   const targetSH = rows[rows.length-1].targetSH;
   let fitSeries = null;
-  const sltModel = sltModelForPoints(fitPoints);
-  if(sltModel && targetSH!==null){
-    const xs = fitPoints.map(p=>p.x);
-    const xMin = Math.min(...xs), xMax = Math.max(...xs), span = (xMax-xMin) || 10;
-    const padFrac = fitPoints.length>=3 ? 0.15 : 0.3;
-    const lo = xMin - span*padFrac, hi = xMax + span*padFrac;
-    const curvePts = [];
-    for(let i=0;i<=24;i++){
-      const x = lo + (hi-lo)*i/24;
-      const vsat = satTempFromPsig(x);
-      if(vsat===null) continue;
-      curvePts.push({x, y: sltModel(x) - vsat - targetSH});
-    }
-    if(curvePts.length>0) fitSeries = {label:'fitted', color:'var(--amber)', points:curvePts, noDots:true};
+  const lowSltCurve = targetSH!==null ? fittedLowSltCurve(rows, houseModel) : null;
+  if(lowSltCurve){
+    const curvePts = lowSltCurve.points
+      .map(p => { const vsat = satTempFromPsig(p.x); return vsat===null ? null : {x:p.x, y: p.y - vsat - targetSH}; })
+      .filter(Boolean);
+    if(curvePts.length>0) fitSeries = {...lowSltCurve, points:curvePts};
   }
 
   const series = [{label:'SH deviation', color:'var(--text)', points, noLine:true}];
@@ -1367,52 +1406,708 @@ function buildDeviationChart(rows){
   const yMin = -15;
 
   return buildLineChart(series, {
-    zeroLine:true, xLabelFn: psigTickFn, xTickPoints: points, yMin, yMax, yZones:[
+    zeroLine:true, xLabelFn: v => String(Math.round(v)), xIntegerTicks: true, yMin, yMax, yZones:[
       [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
     ]
   });
 }
 
-// Visualizes the model actually driving TLOW: the session's own observed
-// (LOW, SLT) points, the fitted curve through them (linear or the
-// monotonic atan model, same fit used in resolveFields), and the
-// assumed-max-healthy-SLT cap as a reference line — so the fit backing
-// that number is visible and checkable, not just its final output.
-// Same tiering resolveFields uses for TLOW: a line through 2 points, the
-// monotonic atan model through 3+. Shared here so every chart built from
-// this model stays consistent with what TLOW is actually solved from.
-function sltModelForPoints(fitPoints){
-  if(fitPoints.length>=3) return fitAtanModel(fitPoints);
-  if(fitPoints.length===2) return fitLinearFn(fitPoints[0], fitPoints[1]);
-  return null;
+/* =========================================================
+   HOUSE-SPECIFIC HISTORICAL MODEL (target/path decomposition)
+
+   JS port of r22_charge_model.py, replacing the earlier
+   atan-envelope-of-SLT approach entirely. Works in terms of the
+   target-superheat error instead of raw SLT:
+
+     Gi  = SH - SHt                    (SHt = target superheat)
+     Vn  = VSAT - a*(IDWB-I0) - b*(ODDB-O0)   (environmental normalization)
+
+   Two independently-fit pieces:
+     TARGET MODEL — where is correct charge?
+       VSAT_target = R + a*(IDWB-I0) + b*(ODDB-O0)
+       Built from ACCEPTED RECHARGE ENDPOINTS: the final reading of each
+       completed recharge session, kept only if it finished close to
+       target (|Gi|<=ENDPOINT_G_TOL_F) and in-range. These are the
+       technician's own real-world confirmations of "this was correct
+       charge." >=3 independent endpoints (non-degenerate IDWB/ODDB
+       spread) let R,a,b be solved directly; 1-2 endpoints can't pin
+       down the environmental slope alone, so path data (below) helps
+       choose a provisional a,b jointly with the path curve.
+     PATH MODEL — how does Gi behave away from target?
+       Gi = H(Vn) = B*[atan((R-C)/W) - atan((Vn-C)/W)]
+       Monotonic and exactly zero at Vn=R by construction (unlike the
+       old model's free-floating asymptotes, the target and the curve's
+       own zero-crossing can never disagree). Fit from recharge-sequence
+       points first (checkups admitted only if consistent), with the
+       same robust Huber-loss + MAD-outlier-rejection approach as
+       before.
+
+   Neither model needs the other to produce a usable TLOW: as soon as
+   >=1 accepted endpoint exists, VSAT_target has a closed-form answer
+   (no root-finding needed) — the path model only adds a predicted-Gi
+   curve for the diagnostic chart. The one gap the Python script left
+   unhandled is ZERO accepted endpoints (a hard crash there) — see
+   computeBootstrapGuidance for the rule-based fallback used instead.
+   ========================================================= */
+const VSAT_MIN = 32.0;
+const VSAT_MAX = 40.0;
+const PLATEAU_MARGIN_F = 2.0;
+const OUTLIER_ABS_F = 3.0;
+const OUTLIER_SIGMA_MULT = 3.0;
+// Matches the app's own "good" convention elsewhere (results gauge green
+// zone, Session Log's err-ok coloring — both ±3°F). Originally ported at
+// 2.0°F from the standalone script, which was stricter than what the rest
+// of the UI already calls "close enough to stop" — a reading the app
+// itself shows as green/fine wasn't reliably accepted as an endpoint.
+const ENDPOINT_G_TOL_F = 3.0;
+const MIN_PATH_POINTS = 3;
+const HUBER_F_SCALE = 1.5;
+// Below this many degrees of IDWB/ODDB spread across a site's own accepted
+// endpoints, neither axis is trusted enough to fit its slope locally — the
+// division in fitTargetDefaultAssisted would be dividing by a near-zero
+// spread, and the "signal" would really just be noise. Matches the app's
+// other 3F thresholds (endpoint tolerance, outlier rejection) rather than
+// being a distinct tuned constant.
+const MIN_AXIS_SPREAD_F = 3.0;
+// Weak regularization on the path curve's B (vertical scale) and W
+// (transition width), added as extra Huber-loss residuals alongside the
+// real data residuals — same pattern as the 0.15*a/0.15*b terms below.
+// Without this, a handful of path points clustered in a narrow Vn range
+// can be fit equally well by a sane, moderate-scale curve OR by a
+// degenerate one that races B to its upper bound while W collapses
+// toward its floor (a tall, needle-thin "step" whose far tail still has
+// just enough residual slope across that narrow window to match the
+// data) — numerically competitive, but a wildly wrong-looking curve
+// outside it. Pulling B toward a modest reference value and discouraging
+// W near zero costs a fit backed by many points almost nothing, while
+// steering an underdetermined few-point fit away from that boundary.
+const PATH_B_PRIOR = 10.0;
+const PATH_B_REG_WEIGHT = 0.15;
+const PATH_INV_W_REG_WEIGHT = 0.5;
+
+function pathH(vn, B, C, W, R){
+  return B*(Math.atan((R-C)/W) - Math.atan((vn-C)/W));
 }
 
-function buildLowSltFitChart(rows, sltCap){
-  const points = rows.filter(r => !isNaN(r.lowPsig) && !isNaN(r.suctionTemp)).map(r => ({x:r.lowPsig, y:r.suctionTemp}));
-  if(points.length===0) return null;
+function normalizedVsat(vsat, idwb, oddb, target){
+  return vsat - target.aIdwb*(idwb-target.I0F) - target.bOddb*(oddb-target.O0F);
+}
 
-  const xs = points.map(p=>p.x);
-  const xMin = Math.min(...xs), xMax = Math.max(...xs);
-  const span = (xMax-xMin) || 10;
+function median(sortedArr){
+  const n = sortedArr.length, mid = Math.floor(n/2);
+  return n%2 ? sortedArr[mid] : (sortedArr[mid-1]+sortedArr[mid])/2;
+}
 
-  let fitSeries = null;
-  const model = sltModelForPoints(points);
-  if(model){
-    const padFrac = points.length>=3 ? 0.15 : 0.3;
-    const lo = xMin - span*padFrac, hi = xMax + span*padFrac;
-    const curvePts = [];
-    for(let i=0;i<=24;i++){ const x = lo + (hi-lo)*i/24; curvePts.push({x, y:model(x)}); }
-    fitSeries = {label: points.length>=3 ? 'fitted (atan)' : 'fitted (linear)', color:'var(--amber)', points:curvePts, noDots:true};
+function robustSigma(residuals){
+  if(residuals.length===0) return 0;
+  const sorted = [...residuals].sort((a,b)=>a-b);
+  const med = median(sorted);
+  const absDevs = residuals.map(r=>Math.abs(r-med)).sort((a,b)=>a-b);
+  return 1.4826*median(absDevs);
+}
+
+function huberContribution(residual, fScale){
+  const u = residual/fScale, z = u*u;
+  return z<=1 ? z : 2*Math.sqrt(z)-1;
+}
+
+// Gathers every usable (LOW, SLT, ODDB, IDWB) reading from a site's
+// archived sessions — both recharge and checkup, since checkups can
+// now consume the target model too (they just never contribute
+// endpoints). Reuses resolveFields() so ambient carry-forward, VSAT
+// lookup, targetSH, and Gi (=shError) all stay consistent with the rest
+// of the app. Gi = SH - SHt is exactly resolveFields' shError, computed
+// there already — reused directly rather than recomputed.
+// True only when the recharge's baseline reading is literally the same
+// reading as the linked checkup's final one — switchedFromCheckupId alone
+// isn't enough, since the tech may have used "Switch to Recharge" then
+// come back hours later with the jug and taken a fresh reading (and
+// updated IDWB/ODDB) instead of using the pre-filled values verbatim. In
+// that case the two are genuinely different observations and neither
+// should be dropped.
+function checkupTrulyAbsorbed(checkupFinalRow, rechargeBaselineRow){
+  if(!checkupFinalRow || !rechargeBaselineRow) return false;
+  return checkupFinalRow.lowPsig===rechargeBaselineRow.lowPsig
+    && checkupFinalRow.suctionTemp===rechargeBaselineRow.suctionTemp
+    && checkupFinalRow.outdoorDB===rechargeBaselineRow.outdoorDB
+    && checkupFinalRow.indoorWB===rechargeBaselineRow.indoorWB;
+}
+
+function loadHouseModelPoints(site){
+  const points = [];
+  let pid = 0;
+  const sessions = [...(site && site.archive || [])];
+  // Include the site's own in-progress session too — without this, TLOW
+  // stays in bootstrap mode for a session's entire duration no matter how
+  // close it gets to target, since nothing about it counts toward the
+  // model until Close. A live reading within the same acceptance
+  // tolerance extractEndpoints already applies to archived endpoints is
+  // just as real a confirmation of correct charge; it doesn't need to
+  // wait for the session to formally close first. This also lets the
+  // session's own readings contribute path-model candidates immediately,
+  // rather than only ever from past sessions.
+  if(site && site.active) sessions.push(site.active);
+
+  // Resolve every session's rows once up front — reused both for the
+  // absorbed-checkup check below and the main per-point loop.
+  const resolvedBySession = new Map();
+  sessions.forEach(session => {
+    const key = String(session.id!==undefined ? session.id : session.createdAt);
+    resolvedBySession.set(key, resolveFields(session.baseline, session.steps || [], {}));
+  });
+
+  // A recharge started via "Switch to Recharge" carries switchedFromCheckupId
+  // — if the reading truly wasn't re-measured, its baseline IS that
+  // checkup's last reading, logged once by each session. Without this,
+  // the exact same physical reading would be pooled twice (once as the
+  // checkup's final row, once as the recharge's baseline), double-
+  // weighting it in the path fit. Only that one final row is skipped —
+  // the checkup's own earlier readings, if any, remain distinct real
+  // observations, and a checkup whose reading WAS updated before the
+  // recharge started isn't touched at all (see checkupTrulyAbsorbed).
+  const absorbedCheckupIds = new Set();
+  sessions.forEach(session => {
+    if(session.switchedFromCheckupId==null) return;
+    const checkupRows = resolvedBySession.get(String(session.switchedFromCheckupId));
+    const rechargeKey = String(session.id!==undefined ? session.id : session.createdAt);
+    const rechargeRows = resolvedBySession.get(rechargeKey);
+    if(!checkupRows || !checkupRows.length || !rechargeRows || !rechargeRows.length) return;
+    if(checkupTrulyAbsorbed(checkupRows[checkupRows.length-1], rechargeRows[0])){
+      absorbedCheckupIds.add(String(session.switchedFromCheckupId));
+    }
+  });
+
+  sessions.forEach(session => {
+    // Archived sessions carry `id`/`closedAtStr`; the not-yet-archived
+    // active session has neither — falls back to `createdAt`/`createdAtStr`.
+    const sessionKey = session.id!==undefined ? session.id : session.createdAt;
+    const rows = resolvedBySession.get(String(sessionKey));
+    const dateStr = (session.closedAtStr || session.createdAtStr || tsStr(sessionKey) || '').split(',')[0];
+    const sessionType = session.type || 'recharge';
+    const isAbsorbedCheckup = sessionType==='checkup' && absorbedCheckupIds.has(String(sessionKey));
+    rows.forEach((row, order) => {
+      if(isAbsorbedCheckup && order===rows.length-1) return;
+      if(isNaN(row.lowPsig) || isNaN(row.suctionTemp) || row.vsat===null) return;
+      if(row.outdoorDB===undefined || row.indoorWB===undefined || isNaN(row.outdoorDB) || isNaN(row.indoorWB)) return;
+      if(row.shError===null) return;
+      points.push({
+        pid: pid++,
+        sessionId: String(sessionKey),
+        sessionType,
+        date: dateStr,
+        order,
+        stage: order===0 ? 'baseline' : `step ${order}`,
+        lowPsig: row.lowPsig,
+        vsatF: row.vsat,
+        sltF: row.suctionTemp,
+        idwbF: row.indoorWB,
+        oddbF: row.outdoorDB,
+        shtF: row.targetSH,
+        giF: row.shError,
+        vnF: null, giPredF: null, residualF: null,
+        status: 'unknown'
+      });
+    });
+  });
+  return points;
+}
+
+// Last recorded point of each recharge session, accepted as a target
+// observation only when it finished in-range and close to Gi=0 — a
+// real-world confirmation of correct charge at those ambient conditions.
+function extractEndpoints(points){
+  const bySession = new Map();
+  points.forEach(p => {
+    if(p.sessionType!=='recharge') return;
+    if(!bySession.has(p.sessionId)) bySession.set(p.sessionId, []);
+    bySession.get(p.sessionId).push(p);
+  });
+
+  const endpoints = [];
+  bySession.forEach((pts, sid) => {
+    const p = pts.slice().sort((a,b)=>a.order-b.order).slice(-1)[0];
+    let accepted, reason;
+    if(!(p.vsatF>=VSAT_MIN && p.vsatF<=VSAT_MAX)){
+      accepted = false; reason = 'VSAT outside normal target range';
+    } else if(Math.abs(p.giF) > ENDPOINT_G_TOL_F){
+      accepted = false; reason = `|Gi|>${ENDPOINT_G_TOL_F} F`;
+    } else {
+      accepted = true; reason = 'accepted target endpoint';
+    }
+    endpoints.push({ sessionId:sid, date:p.date, vsatF:p.vsatF, lowPsig:p.lowPsig, sltF:p.sltF,
+      idwbF:p.idwbF, oddbF:p.oddbF, giF:p.giF, accepted, reason });
+  });
+  endpoints.sort((a,b) => Number(a.sessionId)-Number(b.sessionId));
+  return endpoints;
+}
+
+function endpointPivots(endpoints){
+  const accepted = endpoints.filter(e=>e.accepted);
+  if(accepted.length===0) return null;
+  return {
+    I0: accepted.reduce((s,e)=>s+e.idwbF,0)/accepted.length,
+    O0: accepted.reduce((s,e)=>s+e.oddbF,0)/accepted.length
+  };
+}
+
+// Numeric rank of an Nx3 matrix via Gaussian elimination with partial
+// pivoting (no SVD available without a linear-algebra library — fine at
+// this scale: 3 columns, a handful of rows, well-scaled °F inputs).
+function matrixRank(rowsIn, tol){
+  const rows = rowsIn.map(r=>r.slice());
+  const m = rows[0].length;
+  let rank = 0;
+  for(let col=0; col<m && rank<rows.length; col++){
+    let pivotRow = -1, pivotVal = tol;
+    for(let r=rank; r<rows.length; r++){
+      if(Math.abs(rows[r][col]) > pivotVal){ pivotVal = Math.abs(rows[r][col]); pivotRow = r; }
+    }
+    if(pivotRow===-1) continue;
+    [rows[rank], rows[pivotRow]] = [rows[pivotRow], rows[rank]];
+    for(let r=0;r<rows.length;r++){
+      if(r===rank) continue;
+      const factor = rows[r][col]/rows[rank][col];
+      if(factor===0) continue;
+      for(let c=col;c<m;c++) rows[r][c] -= factor*rows[rank][c];
+    }
+    rank++;
+  }
+  return rank;
+}
+
+function normalEquations(X, y){
+  const XtX = [[0,0,0],[0,0,0],[0,0,0]], Xty = [0,0,0];
+  X.forEach((row,i) => {
+    for(let a=0;a<3;a++){
+      Xty[a] += row[a]*y[i];
+      for(let b=0;b<3;b++) XtX[a][b] += row[a]*row[b];
+    }
+  });
+  return {XtX, Xty};
+}
+
+// Solves a 3x3 linear system via Gaussian elimination with partial
+// pivoting. Returns null if singular (used here on the normal-equations
+// matrix X^T X, so singularity here means the endpoint set is rank-deficient).
+function solveLinear3x3(A, b){
+  const M = A.map((row,i) => [...row, b[i]]);
+  const n = 3;
+  for(let col=0; col<n; col++){
+    let piv = col;
+    for(let r=col+1; r<n; r++){ if(Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r; }
+    if(Math.abs(M[piv][col]) < 1e-9) return null;
+    if(piv!==col){ const tmp=M[piv]; M[piv]=M[col]; M[col]=tmp; }
+    for(let r=col+1; r<n; r++){
+      const factor = M[r][col]/M[col][col];
+      for(let c=col; c<=n; c++) M[r][c] -= factor*M[col][c];
+    }
+  }
+  const x = new Array(n).fill(0);
+  for(let i=n-1;i>=0;i--){
+    let sum = M[i][n];
+    for(let j=i+1;j<n;j++) sum -= M[i][j]*x[j];
+    x[i] = sum/M[i][i];
+  }
+  return x;
+}
+
+function pathCandidatePoints(points){
+  const result = [];
+  points.forEach(p => {
+    if(!(p.vsatF>=VSAT_MIN && p.vsatF<=VSAT_MAX)){ p.status='outside'; return; }
+    if(p.sltF >= p.idwbF - PLATEAU_MARGIN_F){ p.status='plateau'; return; }
+    p.status = 'path';
+    result.push(p);
+  });
+  return result;
+}
+
+function rechargeSeed(candidates){
+  return candidates.filter(p=>p.sessionType==='recharge');
+}
+
+// Fits B,C,W (R fixed from the target model) via Nelder-Mead + Huber loss,
+// then one robust-outlier-rejection refit pass — mirrors
+// _fit_path_with_fixed_target in the Python script.
+function fitPathWithFixedTarget(candidates, target){
+  if(candidates.length < MIN_PATH_POINTS) return null;
+
+  const computeVn = p => normalizedVsat(p.vsatF, p.idwbF, p.oddbF, target);
+  const lb = [0.01, VSAT_MIN, 0.15], ub = [100.0, VSAT_MAX, 10.0];
+
+  const fitOnce = (pts, start) => {
+    const vns = pts.map(computeVn), ys = pts.map(p=>p.giF);
+    const cost = q => {
+      let penalty = 0;
+      for(let i=0;i<3;i++){
+        if(q[i]<lb[i]) penalty += 1e6*(lb[i]-q[i])**2;
+        else if(q[i]>ub[i]) penalty += 1e6*(q[i]-ub[i])**2;
+      }
+      let sum = 0;
+      for(let i=0;i<vns.length;i++){
+        sum += huberContribution(pathH(vns[i], q[0], q[1], q[2], target.RF) - ys[i], HUBER_F_SCALE);
+      }
+      sum += huberContribution(PATH_B_REG_WEIGHT*(q[0]-PATH_B_PRIOR), HUBER_F_SCALE);
+      sum += huberContribution(PATH_INV_W_REG_WEIGHT/q[2], HUBER_F_SCALE);
+      return sum + penalty;
+    };
+    const stepSizes = [2, 0.5, 0.3];
+    const initialSimplex = [start.slice()];
+    for(let i=0;i<3;i++){ const v=start.slice(); v[i]+=stepSizes[i]; initialSimplex.push(v); }
+    const best = nelderMead(cost, initialSimplex, 3000)[0];
+    return best.map((v,i)=>Math.min(ub[i],Math.max(lb[i],v)));
+  };
+
+  let [B,C,W] = fitOnce(candidates, [10.0, 37.0, 1.2]);
+  let raw = candidates.map(p => p.giF - pathH(computeVn(p), B, C, W, target.RF));
+  let sigma = robustSigma(raw);
+  let threshold = Math.max(OUTLIER_ABS_F, OUTLIER_SIGMA_MULT*sigma);
+  let keep = candidates.filter((p,i)=>Math.abs(raw[i])<=threshold);
+
+  if(keep.length>=MIN_PATH_POINTS && keep.length<candidates.length){
+    [B,C,W] = fitOnce(keep, [B,C,W]);
   }
 
-  const series = [{label:'readings', color:'var(--low)', points, noLine:true}];
-  if(fitSeries) series.push(fitSeries);
-
-  return buildLineChart(series, {
-    xLabelFn: psigTickFn,
-    xTickPoints: points,
-    refLine: sltCap
+  candidates.forEach(p => {
+    const vn = computeVn(p);
+    const pred = pathH(vn, B, C, W, target.RF);
+    p.vnF = vn; p.giPredF = pred; p.residualF = p.giF - pred;
   });
+
+  sigma = robustSigma(candidates.map(p=>p.residualF));
+  threshold = Math.max(OUTLIER_ABS_F, OUTLIER_SIGMA_MULT*sigma);
+
+  const keptErr = [];
+  candidates.forEach(p => {
+    if(Math.abs(p.residualF) > threshold){ p.status = 'outlier'; }
+    else { p.status = 'path'; keptErr.push(p.residualF); }
+  });
+
+  if(keptErr.length < MIN_PATH_POINTS) return null;
+  return {
+    B, CF:C, WF:W,
+    rmseF: Math.sqrt(keptErr.reduce((s,e)=>s+e*e,0)/keptErr.length),
+    pointCount: keptErr.length,
+    available: true
+  };
+}
+
+// A "default" target model borrowed from another site's own fully
+// established (endpoint-regression) house model — used only to give a
+// data-poor site a physically-motivated starting point for the IDWB/ODDB
+// environmental slopes (a,b), and — with zero local endpoints — for R
+// too, rather than assuming no environmental sensitivity at all (a=b=0)
+// or leaving the target unset entirely. Only ever borrowed from a site
+// that reached full endpoint-regression on its own (3+ independent
+// endpoints) — never from another site's own provisional/one-endpoint/
+// default-assisted model, which would compound one uncertain estimate on
+// top of another. If no other site has reached that state, there is no
+// default available and callers fall back to their original behavior.
+// Each candidate site is fit with no default lookup of its own (siteId
+// omitted below) — both because reaching endpoint-regression never
+// needs one anyway, and to avoid two data-poor sites referencing each
+// other indefinitely.
+function computeDefaultTarget(excludeSiteId){
+  let best = null;
+  sites.forEach(s => {
+    if(s.id === excludeSiteId) return;
+    const result = fitHouseModel(loadHouseModelPoints(s));
+    if(!result.ok || result.target.state !== 'endpoint-regression') return;
+    if(!best || result.target.endpointCount > best.target.endpointCount){
+      best = { target: result.target, sourceSiteName: s.name };
+    }
+  });
+  return best;
+}
+
+// With 2+ accepted endpoints but not enough independent spread to solve
+// R,a,b directly (see fitHouseModel's rank check), pick whichever axis this
+// site's own endpoints actually vary across and fit that slope locally;
+// the other slope — the one local data can't meaningfully speak to yet —
+// is borrowed from the default model instead of arbitrarily pulled
+// toward 0. I0/O0 are already the mean of this site's own accepted
+// IDWB/ODDB, so each axis's centered x-values are zero-mean and the
+// least-squares slope/intercept reduce to plain sums.
+function fitTargetDefaultAssisted(accepted, I0, O0, defaultModel){
+  const idwbRange = Math.max(...accepted.map(e=>e.idwbF)) - Math.min(...accepted.map(e=>e.idwbF));
+  const oddbRange = Math.max(...accepted.map(e=>e.oddbF)) - Math.min(...accepted.map(e=>e.oddbF));
+  const d = defaultModel.target;
+
+  if(Math.max(idwbRange, oddbRange) < MIN_AXIS_SPREAD_F){
+    // Neither axis has enough local spread to trust a local slope at
+    // all — borrow both from the default model, fit only R.
+    const RF = accepted.reduce((s,e)=>s + e.vsatF - d.aIdwb*(e.idwbF-I0) - d.bOddb*(e.oddbF-O0), 0)/accepted.length;
+    return { RF, aIdwb:d.aIdwb, bOddb:d.bOddb, fitAxis:'none' };
+  }
+
+  if(idwbRange >= oddbRange){
+    const xs = accepted.map(e=>e.idwbF-I0);
+    const ys = accepted.map(e=>e.vsatF - d.bOddb*(e.oddbF-O0));
+    const sxx = xs.reduce((s,x)=>s+x*x,0);
+    const aIdwb = sxx>1e-9 ? xs.reduce((s,x,i)=>s+x*ys[i],0)/sxx : 0;
+    const RF = ys.reduce((s,y)=>s+y,0)/ys.length;
+    return { RF, aIdwb, bOddb:d.bOddb, fitAxis:'idwb' };
+  }
+
+  const xs = accepted.map(e=>e.oddbF-O0);
+  const ys = accepted.map(e=>e.vsatF - d.aIdwb*(e.idwbF-I0));
+  const sxx = xs.reduce((s,x)=>s+x*x,0);
+  const bOddb = sxx>1e-9 ? xs.reduce((s,x,i)=>s+x*ys[i],0)/sxx : 0;
+  const RF = ys.reduce((s,y)=>s+y,0)/ys.length;
+  return { RF, aIdwb:d.aIdwb, bOddb, fitAxis:'oddb' };
+}
+
+// Used when there are too few (or rank-deficient) accepted endpoints to
+// solve R,a,b directly. 1 endpoint: R is just that endpoint's VSAT; a,b
+// come from the default model if one is available (fitTargetDefaultAssisted
+// above), else 0 (no environmental slope is identifiable from a single
+// point on its own). 2+ endpoints with a default model available: the
+// axis-selection closed form above. 2+ endpoints with no default model:
+// the original joint nonlinear fit — endpoint equations get strong
+// weight, recharge-sequence path points shape the curve, and non-seed
+// checkups are admitted only if they agree with that provisional curve
+// (so one odd checkup can't steer an otherwise-underdetermined fit).
+// Mirrors _fit_target_path_assisted.
+function fitTargetPathAssisted(endpoints, candidates, I0, O0, rank, defaultModel){
+  const accepted = endpoints.filter(e=>e.accepted);
+  if(accepted.length===0) return null;
+
+  if(accepted.length===1){
+    const e = accepted[0];
+    const target = defaultModel
+      ? { I0F:e.idwbF, O0F:e.oddbF, RF:e.vsatF, aIdwb:defaultModel.target.aIdwb, bOddb:defaultModel.target.bOddb,
+          endpointCount:1, endpointRank:rank, state:'one-endpoint-default', defaultSource:defaultModel.sourceSiteName }
+      : { I0F:e.idwbF, O0F:e.oddbF, RF:e.vsatF, aIdwb:0, bOddb:0,
+          endpointCount:1, endpointRank:rank, state:'one-endpoint' };
+    const path = fitPathWithFixedTarget(candidates, target);
+    return {target, path};
+  }
+
+  if(defaultModel){
+    const fit = fitTargetDefaultAssisted(accepted, I0, O0, defaultModel);
+    const target = { I0F:I0, O0F:O0, RF:fit.RF, aIdwb:fit.aIdwb, bOddb:fit.bOddb,
+      endpointCount:accepted.length, endpointRank:rank, state:'provisional-default-assisted',
+      defaultSource:defaultModel.sourceSiteName, defaultFitAxis:fit.fitAxis };
+    const path = fitPathWithFixedTarget(candidates, target);
+    return {target, path};
+  }
+
+  const seedCandidates = rechargeSeed(candidates);
+  const fitCandidates = seedCandidates.length >= MIN_PATH_POINTS ? seedCandidates : candidates;
+
+  const lb = [VSAT_MIN, -3.0, -1.0, 0.01, VSAT_MIN, 0.15];
+  const ub = [VSAT_MAX,  3.0,  1.0, 100.0, VSAT_MAX, 10.0];
+
+  const buildResiduals = (q, ptsForPath) => {
+    const [R,a,b,B,C,W] = q;
+    const rr = [];
+    accepted.forEach(e => {
+      const vt = R + a*(e.idwbF-I0) + b*(e.oddbF-O0);
+      rr.push(4.0*(vt - e.vsatF));
+    });
+    ptsForPath.forEach(p => {
+      const vn = p.vsatF - a*(p.idwbF-I0) - b*(p.oddbF-O0);
+      rr.push(pathH(vn,B,C,W,R) - p.giF);
+    });
+    rr.push(0.15*a);
+    rr.push(0.15*b);
+    // Same B/W regularization as fitPathWithFixedTarget — see
+    // PATH_B_PRIOR's comment. Matters even more here, since R,a,b,B,C,W
+    // are all being fit jointly: with only 2 endpoints and a handful of
+    // path points, that's a much more underdetermined problem than fitting
+    // B,C,W alone against a fixed target.
+    rr.push(PATH_B_REG_WEIGHT*(B-PATH_B_PRIOR));
+    rr.push(PATH_INV_W_REG_WEIGHT/W);
+    return rr;
+  };
+
+  const stepSizes = [0.5, 0.05, 0.05, 2, 0.5, 0.3];
+  const runFit = (ptsForPath, start) => {
+    const cost = q => {
+      let penalty = 0;
+      for(let i=0;i<6;i++){
+        if(q[i]<lb[i]) penalty += 1e6*(lb[i]-q[i])**2;
+        else if(q[i]>ub[i]) penalty += 1e6*(q[i]-ub[i])**2;
+      }
+      const rr = buildResiduals(q, ptsForPath);
+      return rr.reduce((s,r)=>s+huberContribution(r, HUBER_F_SCALE),0) + penalty;
+    };
+    const initialSimplex = [start.slice()];
+    for(let i=0;i<6;i++){ const v=start.slice(); v[i]+=stepSizes[i]; initialSimplex.push(v); }
+    const best = nelderMead(cost, initialSimplex, 4000)[0];
+    return best.map((v,i)=>Math.min(ub[i],Math.max(lb[i],v)));
+  };
+
+  const R0 = accepted.reduce((s,e)=>s+e.vsatF,0)/accepted.length;
+  let [R,a,b,B,C,W] = runFit(fitCandidates, [R0,0,0,10.0,37.0,1.2]);
+
+  let target = { I0F:I0, O0F:O0, RF:R, aIdwb:a, bOddb:b,
+    endpointCount:accepted.length, endpointRank:rank, state:'provisional-path-assisted' };
+
+  const seedErrors = fitCandidates.map(p => p.giF - pathH(normalizedVsat(p.vsatF,p.idwbF,p.oddbF,target), B, C, W, target.RF));
+  const seedThreshold = Math.max(OUTLIER_ABS_F, OUTLIER_SIGMA_MULT*robustSigma(seedErrors));
+
+  const fitCandidateIds = new Set(fitCandidates.map(p=>p.pid));
+  const admitted = [];
+  candidates.forEach(p => {
+    const vn = normalizedVsat(p.vsatF,p.idwbF,p.oddbF,target);
+    const pred = pathH(vn,B,C,W,target.RF);
+    const err = p.giF - pred;
+    p.vnF = vn; p.giPredF = pred; p.residualF = err;
+    if(fitCandidateIds.has(p.pid) || Math.abs(err) <= seedThreshold) admitted.push(p);
+    else p.status = 'outlier';
+  });
+
+  let sigma = robustSigma(admitted.map(p=>p.residualF));
+  let threshold = Math.max(OUTLIER_ABS_F, OUTLIER_SIGMA_MULT*sigma);
+
+  const keep = [];
+  admitted.forEach(p => {
+    if(Math.abs(p.residualF) > threshold){ p.status = 'outlier'; }
+    else { p.status = 'path'; keep.push(p); }
+  });
+
+  let finalCandidates = admitted;
+  if(keep.length >= MIN_PATH_POINTS && keep.length < admitted.length){
+    finalCandidates = keep;
+    [R,a,b,B,C,W] = runFit(finalCandidates, [R,a,b,B,C,W]);
+    target.RF = R; target.aIdwb = a; target.bOddb = b;
+  }
+
+  const pathErr = [];
+  finalCandidates.forEach(p => {
+    p.vnF = normalizedVsat(p.vsatF,p.idwbF,p.oddbF,target);
+    p.giPredF = pathH(p.vnF,B,C,W,target.RF);
+    p.residualF = p.giF - p.giPredF;
+    pathErr.push(p.residualF);
+  });
+
+  const path = {
+    B, CF:C, WF:W,
+    rmseF: pathErr.length ? Math.sqrt(pathErr.reduce((s,e)=>s+e*e,0)/pathErr.length) : NaN,
+    pointCount: finalCandidates.length,
+    available: finalCandidates.length >= MIN_PATH_POINTS
+  };
+  return {target, path};
+}
+
+// Top-level entry point. `siteId`, when given, enables borrowing a
+// default target model (a,b, and — with zero local endpoints — R too)
+// from another site that has already reached full endpoint-regression;
+// see computeDefaultTarget. Omitting siteId (as computeDefaultTarget
+// itself does when scanning candidate sites) disables that lookup, which
+// is also what keeps the lookup from ever recursing between sites.
+// Returns {ok:false, endpoints, reason} only when there are zero accepted
+// endpoints AND no default model is available either — the true
+// cold-start case the Python script leaves unhandled; computeBootstrapGuidance
+// covers it instead.
+function fitHouseModel(points, siteId){
+  const endpoints = extractEndpoints(points);
+  const accepted = endpoints.filter(e=>e.accepted);
+  const defaultModel = siteId ? computeDefaultTarget(siteId) : null;
+
+  if(accepted.length===0){
+    if(defaultModel){
+      const d = defaultModel.target;
+      const target = { I0F:d.I0F, O0F:d.O0F, RF:d.RF, aIdwb:d.aIdwb, bOddb:d.bOddb,
+        endpointCount:0, endpointRank:0, state:'default-model', defaultSource:defaultModel.sourceSiteName };
+      const candidates = pathCandidatePoints(points);
+      const path = fitPathWithFixedTarget(candidates, target);
+      return { ok:true, target, path, endpoints, points };
+    }
+    return { ok:false, endpoints, points,
+      reason: `No completed recharge has finished close enough to target yet (within ${ENDPOINT_G_TOL_F}°F) — a target model cannot be established. Live bootstrap guidance is used instead.` };
+  }
+
+  const candidates = pathCandidatePoints(points);
+  const pivots = endpointPivots(endpoints);
+  const X = accepted.map(e=>[1, e.idwbF-pivots.I0, e.oddbF-pivots.O0]);
+  const rank = matrixRank(X, 1e-6);
+
+  if(accepted.length>=3 && rank===3){
+    const y = accepted.map(e=>e.vsatF);
+    const {XtX, Xty} = normalEquations(X, y);
+    const beta = solveLinear3x3(XtX, Xty);
+    if(beta){
+      const target = { I0F:pivots.I0, O0F:pivots.O0, RF:beta[0], aIdwb:beta[1], bOddb:beta[2],
+        endpointCount:accepted.length, endpointRank:rank, state:'endpoint-regression' };
+      const path = fitPathWithFixedTarget(candidates, target);
+      return { ok:true, target, path, endpoints, points };
+    }
+  }
+
+  const result = fitTargetPathAssisted(endpoints, candidates, pivots.I0, pivots.O0, rank, defaultModel);
+  if(!result) return { ok:false, endpoints, points, reason: 'The target/path fit did not converge on this data.' };
+  return { ok:true, target:result.target, path:result.path, endpoints, points };
+}
+
+function targetVsat(idwb, oddb, target){
+  return target.RF + target.aIdwb*(idwb-target.I0F) + target.bOddb*(oddb-target.O0F);
+}
+
+// Direct, closed-form target — no root-finding needed (unlike the old
+// model's bisection-based endpoint solver), since VSAT_target is linear
+// in IDWB/ODDB by construction.
+function targetValues(idwb, oddb, model){
+  const sht = (3*idwb - 80 - oddb)/2;
+  const vt = targetVsat(idwb, oddb, model.target);
+  return { shtF:sht, vsatTargetF:vt, lowTargetPsig: psigFromSatTemp(vt), sltTargetF: vt+sht };
+}
+
+function predictedGi(vsat, idwb, oddb, model){
+  if(!model.path || !model.path.available) return null;
+  const vn = normalizedVsat(vsat, idwb, oddb, model.target);
+  return pathH(vn, model.path.B, model.path.CF, model.path.WF, model.target.RF);
+}
+
+// Rule-based guidance for the true cold-start case (zero accepted
+// endpoints — no target model at all yet), since r22_charge_model.py
+// has no fallback for that case (it raises). Gi is exactly SH-SHt, so
+// Gi>0 means undercharged (needs more), Gi<0 means overcharged — the
+// bands below are signed on Gi directly. A clearly negative Gi (<=-3)
+// is flagged as likely overcharge distinctly from "on target," rather
+// than folding both into one message; every "add more" branch requires
+// Gi>2 first, so this never recommends adding refrigerant on the
+// overcharge side. Uses the app's own full R22 P/T table
+// (satTempFromPsig), not r22_charge_model.py's narrow placeholder one.
+function computeBootstrapGuidance(lowPsig, sltF, oddbF, idwbF){
+  const vsat = satTempFromPsig(lowPsig);
+  if(vsat===null) return null;
+  const sht = (3*idwbF - 80 - oddbF)/2;
+  const shActual = sltF - vsat;
+  const gi = shActual - sht;
+  const plateau = sltF >= idwbF - PLATEAU_MARGIN_F;
+  const base = { vsatF:vsat, shActualF:shActual, shTargetF:sht, giF:gi, plateau };
+
+  if(vsat < VSAT_MIN){
+    return { ...base, mode:'freeze-recovery',
+      instruction:`Charge in short bursts toward VSAT ${VSAT_MIN}-${VSAT_MIN+1} F. Readings below ${VSAT_MIN}°F aren't used to fit the curve.` };
+  }
+  if(vsat >= VSAT_MAX){
+    return { ...base, mode:'bootstrap-limit',
+      instruction:`Stop adding refrigerant from this guidance — VSAT reached ${VSAT_MAX}°F. Stabilize and re-evaluate.` };
+  }
+  if(gi <= -3.0){
+    return { ...base, mode:'overcharge',
+      instruction:'Do not add refrigerant. Gi is well negative (SH below target), which usually means overcharge — stop and recheck airflow/load before doing anything else.' };
+  }
+  if(gi <= 3.0){
+    return { ...base, mode:'stop', instruction:'Stop charging and stabilize; Gi is within target range.' };
+  }
+  if(gi <= 5.0){
+    return { ...base, mode:'fine',
+      instruction:'Very close: use at most one very short burst, then stabilize — do not chase the next whole PSI.' };
+  }
+  if(plateau){
+    return { ...base, mode:'plateau-learning',
+      instruction:'SLT is at/near the IDWB plateau. After stabilizing, advance LOW by about 2 psi and record another point.' };
+  }
+  if(gi <= 10.0){
+    return { ...base, mode:'approach',
+      instruction:'SLT has left the IDWB plateau. Advance LOW by about 1 psi, then stabilize and record another point.' };
+  }
+  return { ...base, mode:'approach',
+    instruction:'SLT has left the IDWB plateau but SH remains high. Advance LOW by about 1-2 psi, then stabilize and record another point.' };
 }
 
 /* =========================================================
@@ -1420,44 +2115,101 @@ function buildLowSltFitChart(rows, sltCap){
    ========================================================= */
 const dateLabelFn = x => new Date(x).toLocaleDateString([], {month:'short', day:'numeric'});
 
+// Bare "Jun 10" is ambiguous once the plotted domain spans more than a
+// year (e.g. a site with sessions in both 2024 and 2025) — add a 2-digit
+// year in that case so ticks stay unambiguous.
+function dateAxisLabelFn(xDomain){
+  const spanDays = xDomain ? (xDomain.max - xDomain.min) / (24*60*60*1000) : 0;
+  return spanDays > 365
+    ? x => new Date(x).toLocaleDateString([], {month:'short', day:'numeric', year:'2-digit'})
+    : dateLabelFn;
+}
+
 function collectDeviationTrendBySite(site){
   if(!site) return [];
-  return (site.archive || [])
+  const archive = site.archive || [];
+  const rowsById = new Map();
+  archive.forEach(s => rowsById.set(String(s.id), resolveFields(s.baseline, s.steps, {})));
+
+  // A checkup absorbed into an immediately-following recharge (see
+  // loadHouseModelPoints / checkupTrulyAbsorbed) contributes only one "as-found"
+  // point either way — a checkup's is just its final reading (this
+  // function's own asFound rule below), which — only when the reading
+  // truly wasn't re-measured before the recharge started — is exactly
+  // the recharge's baseline. Skip the checkup's point entirely in that
+  // case rather than plotting the same reading twice at (essentially)
+  // the same date; a checkup whose reading WAS updated in between is
+  // left alone, since it's then a genuinely separate observation.
+  const absorbedCheckupIds = new Set();
+  archive.forEach(s => {
+    if(s.switchedFromCheckupId==null) return;
+    const checkupRows = rowsById.get(String(s.switchedFromCheckupId));
+    const rechargeRows = rowsById.get(String(s.id));
+    if(!checkupRows || !checkupRows.length || !rechargeRows || !rechargeRows.length) return;
+    if(checkupTrulyAbsorbed(checkupRows[checkupRows.length-1], rechargeRows[0])){
+      absorbedCheckupIds.add(String(s.switchedFromCheckupId));
+    }
+  });
+
+  return archive
+    .filter(s => !absorbedCheckupIds.has(String(s.id)))
     .map(s => {
-      const rows = resolveFields(s.baseline, s.steps, {sltCap: currentSltCap()});
+      const rows = rowsById.get(String(s.id));
       const baseline = rows[0];
       const final = rows[rows.length-1];
-      return { x: s.closedAt || s.id, y: baseline.shError, yFinal: final.shError, hasFinal: rows.length>1, type: s.type || 'recharge' };
+      const type = s.type || 'recharge';
+      // "As-found" is the pre-work state: for a recharge that's genuinely
+      // the baseline, before anything was added. A checkup never adds
+      // refrigerant, though, so extra checkup readings are just re-checks
+      // to confirm the system had stabilized — its last reading is the
+      // more trustworthy "as-found" snapshot, not its first.
+      const asFound = type==='recharge' ? baseline : final;
+      return { x: s.closedAt || s.id, y: asFound.shError, yFinal: final.shError, hasFinal: rows.length>1 && type==='recharge', type };
     })
     .filter(p => p.y!==null && !isNaN(p.x))
     .sort((a,b) => a.x-b.x);
 }
 
-function collectLeakRateTrend(site){
+// A "confirmed good" anchor is any archived session (checkup or recharge)
+// whose own final reading closed within the app's own accepted-endpoint
+// tolerance (|Gi|<=3F, ENDPOINT_G_TOL_F) — i.e. the system really was
+// at target when that session ended, whether it got there via a checkup
+// that found nothing wrong or a recharge that corrected it. Only the
+// interval between one of these and a later recharge is an actual
+// measurement of how long it took to leak that recharge's oz back out.
+// A recharge with no such anchor before it — typically the very first
+// session ever logged at a site — has a genuinely unknown discharge
+// duration and is left out of the rate entirely, rather than guessing:
+// checkups are rare in practice, so the true gap since the system was
+// last known-good could be months or years, and assuming a short floor
+// (e.g. 30 days) would badly overstate the real leak rate.
+function computeLeakIntervals(site){
   if(!site) return [];
-  const recharges = (site.archive || [])
-    .filter(s => s.type !== 'checkup')
-    .map(s => ({date: s.closedAt || s.id, oz: s.summary.totalOz}))
-    .filter(p => p.oz!==null && p.oz!==undefined && !isNaN(p.date) && !isNaN(p.oz))
+  const sessions = (site.archive || [])
+    .map(s => {
+      const rows = resolveFields(s.baseline, s.steps, {});
+      const final = rows[rows.length-1];
+      return { date: s.closedAt || s.id, type: s.type || 'recharge',
+        oz: s.summary ? s.summary.totalOz : null, giF: final.shError };
+    })
+    .filter(p => !isNaN(p.date))
     .sort((a,b) => a.date-b.date);
-  if(recharges.length===0) return [];
 
-  const points = [];
-  // First recharge on record: there's no known date the system was last
-  // "full", so there's no measured interval to divide by. Floor assumption —
-  // treat it as covering at least the last 30 days of loss. The real gap
-  // could be months or years, so this is a conservative minimum, not a
-  // measurement, and is flagged as such below.
-  points.push({x: recharges[0].date, y: recharges[0].oz/16, floor:true});
-
-  for(let i=1;i<recharges.length;i++){
-    const days = (recharges[i].date - recharges[i-1].date) / (24*60*60*1000);
-    if(days>0){
-      const ozPerMonth = recharges[i].oz/days*30;
-      points.push({x: recharges[i].date, y: ozPerMonth/16, floor:false});
+  const intervals = [];
+  let lastGoodDate = null;
+  sessions.forEach(s => {
+    const isRecharge = s.type !== 'checkup' && s.oz!==null && s.oz!==undefined && !isNaN(s.oz) && s.oz>0;
+    if(isRecharge && lastGoodDate!==null){
+      const days = (s.date - lastGoodDate) / (24*60*60*1000);
+      if(days>0) intervals.push({date: s.date, oz: s.oz, days});
     }
-  }
-  return points;
+    if(s.giF!==null && Math.abs(s.giF)<=ENDPOINT_G_TOL_F) lastGoodDate = s.date;
+  });
+  return intervals;
+}
+
+function collectLeakRateTrend(site){
+  return computeLeakIntervals(site).map(iv => ({x: iv.date, y: (iv.oz/iv.days*30)/16}));
 }
 
 function buildLeakRateTrendChart(site, xDomain){
@@ -1465,7 +2217,7 @@ function buildLeakRateTrendChart(site, xDomain){
   if(points.length===0) return null;
   return buildLineChart(
     [{label:'lb lost/month', color:'var(--amber)', points, noLine:true}],
-    { xLabelFn: dateLabelFn, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max }
+    { xLabelFn: dateAxisLabelFn(xDomain), xDateTicks: true, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max }
   );
 }
 
@@ -1480,7 +2232,7 @@ function buildDeviationTrendChart(site, xDomain){
   if(postChargePoints.length) series.push({label:'post charge', color:'var(--amber)', points:postChargePoints, noLine:true});
   return buildLineChart(
     series,
-    { zeroLine:true, xLabelFn: dateLabelFn, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max, yMin, yMax,
+    { zeroLine:true, xLabelFn: dateAxisLabelFn(xDomain), xDateTicks: true, xMin: xDomain && xDomain.min, xMax: xDomain && xDomain.max, yMin, yMax,
       yZones:[
         [-40,-10,'var(--red)'],[-10,-3,'var(--amber)'],[-3,3,'var(--green)'],[3,10,'var(--amber)'],[10,40,'var(--red)']
       ]}
@@ -1488,34 +2240,30 @@ function buildDeviationTrendChart(site, xDomain){
 }
 
 function computeLeakForecast(site){
-  const recharges = (site.archive || [])
+  const allRecharges = (site.archive || [])
     .filter(s => s.type !== 'checkup')
-    .map(s => ({date: s.closedAt || s.id, oz: s.summary.totalOz}))
-    .filter(p => p.oz!==null && p.oz!==undefined && !isNaN(p.date) && !isNaN(p.oz))
+    .map(s => ({date: s.closedAt || s.id, oz: s.summary ? s.summary.totalOz : null}))
+    .filter(p => p.oz!==null && p.oz!==undefined && !isNaN(p.date) && !isNaN(p.oz) && p.oz>0)
     .sort((a,b) => a.date-b.date);
 
-  if(recharges.length === 0){
+  if(allRecharges.length === 0){
     return { possible:false, reason: 'No completed recharges on record yet for this site.' };
   }
 
-  // First recharge: no known "last full" date, so assume a conservative
-  // floor of 30 days of loss (see collectLeakRateTrend). Every recharge
-  // after that uses a real measured interval.
-  let totalOz = recharges[0].oz, totalDays = 30;
-  for(let i=1;i<recharges.length;i++){
-    const days = (recharges[i].date - recharges[i-1].date) / (24*60*60*1000);
-    if(days>0){ totalOz += recharges[i].oz; totalDays += days; }
+  const intervals = computeLeakIntervals(site);
+  if(intervals.length === 0){
+    return { possible:false, reason: 'Not enough data yet to estimate a rate — need a confirmed fully-charged reading (a checkup found in range, or a recharge that finished in range) followed by a later recharge, so how long it took to leak that recharge back out is actually known.' };
   }
-  if(totalDays<=0 || totalOz<=0){
-    return { possible:false, reason: 'Not enough data yet to estimate a rate.' };
-  }
+
+  const totalOz = intervals.reduce((s,iv)=>s+iv.oz,0);
+  const totalDays = intervals.reduce((s,iv)=>s+iv.days,0);
   const ozPerDay = totalOz/totalDays;
 
-  const lastRecharge = recharges[recharges.length-1];
+  const lastRecharge = allRecharges[allRecharges.length-1];
   const daysSinceLast = (Date.now() - lastRecharge.date) / (24*60*60*1000);
   const currentDeficitEstimate = ozPerDay * Math.max(0,daysSinceLast);
 
-  const typicalTriggerOz = recharges.reduce((sum,r)=>sum+r.oz,0) / recharges.length;
+  const typicalTriggerOz = allRecharges.reduce((sum,r)=>sum+r.oz,0) / allRecharges.length;
 
   let daysUntilNext = null, projectedDate = null;
   if(currentDeficitEstimate < typicalTriggerOz){
@@ -1531,8 +2279,8 @@ function computeLeakForecast(site){
     ozPerDay, ozPerMonth: ozPerDay*30,
     daysSinceLast, currentDeficitEstimate, typicalTriggerOz,
     daysUntilNext, projectedDate,
-    basedOnIntervals: recharges.length,
-    singleRechargeFloor: recharges.length===1
+    basedOnIntervals: intervals.length,
+    unratedRecharges: allRecharges.length - intervals.length
   };
 }
 
@@ -1647,20 +2395,49 @@ function renderSitePanel(){
     return;
   }
 
+  const sessionCount = site.archive.length + (site.active?1:0);
+  const tag = `${sessionCount} session${sessionCount===1?'':'s'} on record`;
+
+  // Collapsed, information-only view — the default, and the only view
+  // once a session is in progress (site config can't be changed
+  // mid-session anyway, so there's nothing to "Update" there). Keeps the
+  // same site-info-strip look the expanded view uses, just without the
+  // management controls.
+  if(sessionInProgress() || !siteInfoOpen){
+    el.innerHTML = `
+      <div class="panel-head">
+        <span class="tag" style="font-size:14px;text-transform:none;letter-spacing:normal;">${site.name}</span>
+        <span class="tag">${tag}</span>
+      </div>
+      <div class="ambient-summary">
+        <div class="site-info-strip" style="margin-top:0;">
+          <div class="item"><div class="k">Refrigerant</div><div class="v">${site.refrigerant}</div></div>
+          <div class="item"><div class="k">Metering</div><div class="v">${site.meteringType}</div></div>
+          <div class="item"><div class="k">Nameplate charge</div><div class="v">${site.nameplateOz ? site.nameplateOz+' oz ('+fmt2(site.nameplateOz/16)+' lb)' : '—'}</div></div>
+          <div class="item"><div class="k">System size</div><div class="v">${site.tons ? site.tons+' ton' : '—'}</div></div>
+        </div>
+        ${!sessionInProgress() ? `<button class="btn ghost" id="siteInfoToggleBtn">Switch</button>` : ''}
+      </div>
+    `;
+    const toggleBtn = document.getElementById('siteInfoToggleBtn');
+    if(toggleBtn) toggleBtn.onclick = () => { siteInfoOpen = true; renderSitePanel(); };
+    return;
+  }
+
   el.innerHTML = `
     <div class="panel-head">
       <div class="panel-title">Site</div>
-      <span class="tag">${site.archive.length + (site.active?1:0)} session${(site.archive.length + (site.active?1:0))===1?'':'s'} on record</span>
+      <span class="tag">${tag}</span>
     </div>
     <div class="site-row">
-      <select id="siteSelect" ${active?'disabled title="Close (or cancel) the current session first"':''}>
+      <select id="siteSelect">
         ${sites.map(s => `<option value="${s.id}" ${s.id===currentSiteId?'selected':''}>${s.name}</option>`).join('')}
       </select>
-      <button class="btn ghost" id="newSiteBtn" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">New</button>
-      <button class="btn ghost" id="siteImportTriggerBtn" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">Import</button>
+      <button class="btn ghost" id="newSiteBtn" style="font-size:12px;padding:6px 12px;">New</button>
+      <button class="btn ghost" id="siteImportTriggerBtn" style="font-size:12px;padding:6px 12px;">Import</button>
       <button class="btn ghost" id="siteExportBtn" style="font-size:12px;padding:6px 12px;">Export</button>
-      <button class="btn ghost" id="demoSiteBtn2" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">Add demo</button>
-      <button class="btn danger" id="deleteSiteBtn" ${active?'disabled title="Close (or cancel) the current session first"':''} style="font-size:12px;padding:6px 12px;">Delete</button>
+      <button class="btn ghost" id="demoSiteBtn2" style="font-size:12px;padding:6px 12px;">Add demo</button>
+      <button class="btn danger" id="deleteSiteBtn" style="font-size:12px;padding:6px 12px;">Delete</button>
       <input type="file" id="siteImportFile" accept="application/json" style="display:none;">
     </div>
     <div class="site-info-strip">
@@ -1668,10 +2445,10 @@ function renderSitePanel(){
       <div class="item"><div class="k">Metering</div><div class="v">${site.meteringType}</div></div>
       <div class="item"><div class="k">Nameplate charge</div><div class="v">${site.nameplateOz ? site.nameplateOz+' oz ('+fmt2(site.nameplateOz/16)+' lb)' : '—'}</div></div>
       <div class="item"><div class="k">System size</div><div class="v">${site.tons ? site.tons+' ton' : '—'}</div></div>
-      <div class="item"><div class="k">Max healthy SLT</div><div class="v">${sltCapFor(site)}°F${site.sltCap==null?' (default)':''}</div></div>
     </div>
     <div class="btn-row" style="margin-top:12px;">
       <button class="btn primary" id="editSiteBtn">Edit</button>
+      <button class="btn ghost" id="siteInfoCloseBtn">Done</button>
     </div>
     <div id="siteEditForm"></div>
     <div class="backup-note" style="margin-top:12px;">Export moves just "${site.name}" to another device, or hands it to yourself later — named after the site so it's easy to tell apart from others. For everything at once, use Backup at the bottom of the page.</div>
@@ -1679,17 +2456,12 @@ function renderSitePanel(){
   document.getElementById('siteSelect').onchange = (e) => onSwitchSite(e.target.value);
   document.getElementById('newSiteBtn').onclick = onShowNewSiteForm;
   document.getElementById('editSiteBtn').onclick = onShowEditSiteForm;
+  document.getElementById('siteInfoCloseBtn').onclick = () => { siteInfoOpen = false; siteFormMode = null; renderSitePanel(); };
   document.getElementById('demoSiteBtn2').onclick = onAddDemoSite;
   document.getElementById('deleteSiteBtn').onclick = onDeleteSite;
   document.getElementById('siteExportBtn').onclick = exportSite;
   const siteImportFile = document.getElementById('siteImportFile');
-  document.getElementById('siteImportTriggerBtn').onclick = async () => {
-    if(active){
-      await showAlertModal('Close (or cancel) the current session before importing a site — an import could overwrite it.');
-      return;
-    }
-    siteImportFile.click();
-  };
+  document.getElementById('siteImportTriggerBtn').onclick = () => siteImportFile.click();
   siteImportFile.onchange = () => {
     if(siteImportFile.files && siteImportFile.files[0]){
       importSiteFile(siteImportFile.files[0]);
@@ -1724,11 +2496,6 @@ function renderSiteEditForm(){
         <div class="field"><label>Nameplate charge<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="1" id="siteFormOz" value="${site&&site.nameplateOz?site.nameplateOz:''}" placeholder="oz"></div>
         <div class="field"><label>System size<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="0.5" id="siteFormTons" value="${site&&site.tons?site.tons:''}" placeholder="tons"></div>
       </div>
-      <div class="field-grid" style="margin-top:12px;">
-        <div class="field"><label>Assumed max healthy SLT<span class="opt">optional</span></label><input type="number" inputmode="decimal" step="1" id="siteFormSltCap" value="${site&&site.sltCap!=null?site.sltCap:''}" placeholder="55">
-        <div class="field-note">used for the rough first-reading TLOW estimate before this session has enough of its own data — a properly-running system's suction line temp shouldn't realistically run above this, even on a hot day. Default is 55°F; raise it for a site that legitimately runs warmer (e.g. very hot/humid climates), lower it if this site tends to overshoot with the default.</div>
-        </div>
-      </div>
       <div class="btn-row">
         <button class="btn primary" id="siteFormSaveBtn">${siteFormMode==='edit'?'Save changes':'Create site'}</button>
         <button class="btn ghost" id="siteFormCancelBtn">Cancel</button>
@@ -1748,15 +2515,13 @@ async function onSaveSiteForm(){
   }
   const nameplateOz = document.getElementById('siteFormOz').value;
   const tons = document.getElementById('siteFormTons').value;
-  const sltCapVal = document.getElementById('siteFormSltCap').value;
-  const sltCap = sltCapVal==='' ? undefined : Number(sltCapVal);
   if(siteFormMode==='new'){
-    const site = { id:newSiteId(), name, refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz, tons, sltCap, createdAt:Date.now(), active:null, archive:[] };
+    const site = { id:newSiteId(), name, refrigerant:'R-22', meteringType:'Fixed-orifice', nameplateOz, tons, createdAt:Date.now(), active:null, archive:[] };
     sites.push(site);
     currentSiteId = site.id;
   } else {
     const site = currentSite();
-    site.name = name; site.nameplateOz = nameplateOz; site.tons = tons; site.sltCap = sltCap;
+    site.name = name; site.nameplateOz = nameplateOz; site.tons = tons;
   }
   siteFormMode = null;
   syncActiveArchiveFromSite();
@@ -1822,64 +2587,77 @@ async function onAddDemoSite(){
   renderAll();
 }
 
+// Identical to model/demo_data.json (see model/R22_charging_model_algorithm.md)
+// — same dates, same ids, same readings — so a user can cross-check this
+// in-app Demo site directly against the doc's worked examples and plots.
+// No separate precursor checkups — a checkup whose last reading is
+// immediately recharged adds nothing a recharge's own baseline doesn't
+// already capture, and duplicates the reading in the model/plots.
 function buildDemoSite(){
-  const now = Date.now();
-  const day = 24*60*60*1000;
-  const sessionA = {
-    id: now - 75*day, type:'recharge', createdAt: now-75*day, closedAt: now-75*day+40*60*1000, closedAtStr: tsStr(now-75*day+40*60*1000),
+  const min = 60*1000;
+
+  const rechargeABase = 1718031600000;   // 6/10/2024, 10:00 AM
+  const rechargeAClosed = 1718033100000; // 6/10/2024, 10:25 AM
+  const midCheckupAt = 1747319460000;    // 5/15/2025, 9:31 AM
+  const rechargeBBase = 1752850800000;   // 7/18/2025, 10:00 AM
+  const rechargeBClosed = 1752852120000; // 7/18/2025, 10:22 AM
+
+  const rechargeA = {
+    id: rechargeABase, type:'recharge', createdAt: rechargeABase,
+    closedAt: rechargeAClosed, closedAtStr: tsStr(rechargeAClosed),
     baseline: {
-      startWeight:25.00, lowPsig:42, highPsig:215, suctionTemp:64, outdoorDB:78, indoorWB:68, liquidTemp:80,
-      notes:'Demo data — annual checkup found low charge', timestamp: now-75*day
+      startWeight:34.60, baseWeight:34.15, lowPsig:60, highPsig:245, suctionTemp:68, outdoorDB:91, indoorWB:68, liquidTemp:99,
+      notes:'Demo data — found badly low on charge', timestamp: rechargeABase+3*min
     },
     steps: [
-      {lowPsig:52, highPsig:222, suctionTemp:62, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+15*60*1000},
-      {lowPsig:60, highPsig:228, suctionTemp:60, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-75*day+35*60*1000}
+      {lowPsig:63.1, highPsig:'', suctionTemp:60.4, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', stepWeight:34.05, timestamp: rechargeABase+9*min},
+      {lowPsig:64, highPsig:'', suctionTemp:56.9, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', stepWeight:34.02, timestamp: rechargeABase+15*min},
+      {lowPsig:65, highPsig:'', suctionTemp:55, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', stepWeight:34.00, timestamp: rechargeABase+21*min}
     ],
-    finalWeight: 24.50, finalWeightAt: now-75*day+35*60*1000, finalWeightAtStr: tsStr(now-75*day+35*60*1000)
+    finalWeight: 34.00, finalWeightAt: rechargeAClosed, finalWeightAtStr: tsStr(rechargeAClosed)
   };
-  const rowsA = resolveFields(sessionA.baseline, sessionA.steps);
+  const rowsA = resolveFields(rechargeA.baseline, rechargeA.steps);
   const lastA = rowsA[rowsA.length-1];
-  const measuredA = sessionMeasuredTotalOz(sessionA);
-  sessionA.summary = { totalOz: measuredA!==null?measuredA:lastA.totalOz, finalError:lastA.shError, stepCount:sessionA.steps.length };
+  const measuredA = sessionMeasuredTotalOz(rechargeA);
+  rechargeA.summary = { totalOz: measuredA!==null?measuredA:lastA.totalOz, finalError:lastA.shError, stepCount:rechargeA.steps.length };
 
-  const sessionB = {
-    id: now - 20*day, type:'recharge', createdAt: now-20*day, closedAt: now-20*day+45*60*1000, closedAtStr: tsStr(now-20*day+45*60*1000),
+  const midCheckup = {
+    id: midCheckupAt, type:'checkup', createdAt: midCheckupAt, createdAtStr: tsStr(midCheckupAt),
+    closedAt: midCheckupAt, closedAtStr: tsStr(midCheckupAt),
     baseline: {
-      startWeight:26.00, baseWeight:26.15, lowPsig:44, highPsig:250, suctionTemp:70, outdoorDB:92, indoorWB:69, liquidTemp:88,
-      notes:'Demo data — hot week, tenant reported weak cooling', timestamp: now-20*day
+      lowPsig:60.8, highPsig:245, suctionTemp:67, outdoorDB:86, indoorWB:68, indoorDB:76, indoorRH:52,
+      notes:'Demo data — routine mid-season check, holding steady', timestamp: midCheckupAt
+    },
+    steps: []
+  };
+  const rowsMid = resolveFields(midCheckup.baseline, midCheckup.steps);
+  midCheckup.summary = { totalOz:0, finalError: rowsMid[rowsMid.length-1].shError, stepCount:0 };
+
+  const rechargeB = {
+    id: rechargeBBase, type:'recharge', createdAt: rechargeBBase,
+    closedAt: rechargeBClosed, closedAtStr: tsStr(rechargeBClosed),
+    baseline: {
+      startWeight:33.50, lowPsig:61, highPsig:295, suctionTemp:65, outdoorDB:98, indoorWB:66, indoorDB:76, indoorRH:57,
+      notes:'Demo data — a year later, a hot day found it low again', timestamp: rechargeBBase
     },
     steps: [
-      {stepWeight:25.70, lowPsig:52, highPsig:258, suctionTemp:67, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+15*60*1000},
-      {stepWeight:25.35, lowPsig:58, highPsig:264, suctionTemp:65, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-20*day+40*60*1000}
+      {lowPsig:63, highPsig:'', suctionTemp:65, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: rechargeBBase+4*min},
+      {lowPsig:64, highPsig:'', suctionTemp:63, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: rechargeBBase+11*min},
+      {lowPsig:65.5, highPsig:'', suctionTemp:55, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: rechargeBBase+16*min},
+      {lowPsig:67.5, highPsig:'', suctionTemp:49, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: rechargeBBase+20*min}
     ],
-    finalWeight: 25.35, finalWeightAt: now-20*day+40*60*1000, finalWeightAtStr: tsStr(now-20*day+40*60*1000)
+    finalWeight: 33.10, finalWeightAt: rechargeBClosed, finalWeightAtStr: tsStr(rechargeBClosed)
   };
-  const rowsB = resolveFields(sessionB.baseline, sessionB.steps);
+  const rowsB = resolveFields(rechargeB.baseline, rechargeB.steps);
   const lastB = rowsB[rowsB.length-1];
-  const measuredB = sessionMeasuredTotalOz(sessionB);
-  sessionB.summary = { totalOz: measuredB!==null?measuredB:lastB.totalOz, finalError:lastB.shError, stepCount:sessionB.steps.length };
-
-  const sessionC = {
-    id: now - 5*day, type:'checkup', createdAt: now-5*day, createdAtStr: tsStr(now-5*day),
-    closedAt: now-5*day+12*60*1000, closedAtStr: tsStr(now-5*day+12*60*1000),
-    baseline: {
-      lowPsig:61, highPsig:256, suctionTemp:52, outdoorDB:90, indoorWB:68, liquidTemp:90,
-      notes:'Demo data — routine follow-up checkup after the last recharge', timestamp: now-5*day
-    },
-    steps: [
-      {lowPsig:60, highPsig:258, suctionTemp:51, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-5*day+6*60*1000},
-      {lowPsig:61, highPsig:257, suctionTemp:52, outdoorDB:'', indoorWB:'', liquidTemp:'', notes:'', timestamp: now-5*day+12*60*1000}
-    ]
-  };
-  const rowsC = resolveFields(sessionC.baseline, sessionC.steps);
-  const lastC = rowsC[rowsC.length-1];
-  sessionC.summary = { totalOz: null, finalError:lastC.shError, stepCount:sessionC.steps.length };
+  const measuredB = sessionMeasuredTotalOz(rechargeB);
+  rechargeB.summary = { totalOz: measuredB!==null?measuredB:lastB.totalOz, finalError:lastB.shError, stepCount:rechargeB.steps.length };
 
   return {
     id: newSiteId(), name:'Demo', refrigerant:'R-22', meteringType:'Fixed-orifice',
-    nameplateOz:79, tons:3.5, createdAt: now-75*day,
-    active: null,
-    archive: [sessionC, sessionB, sessionA]
+    nameplateOz:79, tons:3.5, createdAt: rechargeABase,
+    active: null, isDemo: true,
+    archive: [rechargeB, midCheckup, rechargeA]
   };
 }
 
@@ -1891,10 +2669,19 @@ function renderBaselinePanel(){
   el.style.display = 'block';
 
   if(!active){
+    // Step 2 (record first reading) only shows once environmental
+    // parameters are confirmed AND not currently being edited —
+    // ambientFormOpen covers "reopened via the Edit button up in the
+    // Environmental Parameters panel" (a tweak, not a full cancel).
+    if(!pendingEnvConfirmed || ambientFormOpen){
+      el.style.display = 'none';
+      return;
+    }
+    const rp = pendingReadingPrefill || {};
     el.innerHTML = `
       <div class="panel-head">
-        <div class="panel-title">Start a session</div>
-        <span class="tag">Baseline</span>
+        <div class="panel-title">Session</div>
+        <span class="tag">Step 2 — first reading</span>
       </div>
       <div class="type-toggle">
         <button class="btn ${pendingSessionType==='checkup'?'active':'ghost'}" id="typeCheckupBtn">Checkup</button>
@@ -1903,21 +2690,18 @@ function renderBaselinePanel(){
       <p class="subhead" style="margin-top:-6px;">${pendingSessionType==='recharge'
         ? 'Enter the system\'s pre-charge readings before adding any refrigerant.'
         : 'Just reading gauges, not charging — no jug needed. Good for periodic verification between recharges.'}</p>
-      ${baselinePrefill ? `<div class="status-line" style="margin:-6px 0 14px;">Outdoor/indoor conditions carried over from the duplicated session — readings still need a fresh measurement. <button class="btn ghost" id="clearPrefillBtn">Clear</button></div>` : ''}
+      ${pendingReadingPrefill ? `<div class="status-line" style="margin:-6px 0 14px;">LOW/HIGH/SLT/LLT carried over from the checkup just closed — edit if anything's changed since that last reading.</div>` : ''}
       ${pendingSessionType==='recharge' ? `
       <div class="field-grid">
         ${fieldNumber('bw','Starting jug weight (scale)',{required:true,step:'0.01',placeholder:'e.g. 24.60',note:'lb, before any refrigerant is added — this and the final weight when you finish are the only two weigh-ins for the whole session'})}
       </div>
       ` : ''}
       <div class="field-grid" style="grid-template-columns:1fr 1fr;">
-        ${fieldNumber('blow','LOW — Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig'})}
-        ${fieldNumber('bhigh','HIGH — High-side pressure',{tone:'high',step:'1',placeholder:'psig',optLabel:'optional'})}
-        ${fieldNumber('bsuction','SLT — Suction line temp',{required:true,step:'0.1',placeholder:'°F'})}
-        ${fieldNumber('bliquid','LLT — Liquid line temp',{step:'0.1',placeholder:'°F, for subcooling'})}
-        ${fieldNumber('biwb','IDWB — Indoor wet-bulb',{required:true,step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.indoorWB):''})}
-        ${fieldNumber('bodb','ODDB — Outdoor dry-bulb',{required:true,step:'0.1',placeholder:'°F',value:baselinePrefill?numOrEmpty(baselinePrefill.outdoorDB):''})}
+        ${fieldNumber('blow','LOW — Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig',value:numOrEmpty(rp.lowPsig)})}
+        ${fieldNumber('bhigh','HIGH — High-side pressure',{tone:'high',step:'1',placeholder:'psig',optLabel:'optional',value:numOrEmpty(rp.highPsig)})}
+        ${fieldNumber('bsuction','SLT — Suction line temp',{required:true,step:'0.1',placeholder:'°F',value:numOrEmpty(rp.suctionTemp)})}
+        ${fieldNumber('bliquid','LLT — Liquid line temp',{step:'0.1',placeholder:'°F, for subcooling',value:numOrEmpty(rp.liquidTemp)})}
       </div>
-      ${wbHelperBlock('b','biwb',{abbrevLabels:true})}
       ${pendingSessionType==='recharge' ? `
       <div class="field" style="margin-top:12px;">
         <label>Weight at baseline<span class="opt">optional</span></label>
@@ -1932,20 +2716,16 @@ function renderBaselinePanel(){
         <input type="text" id="bnotes" placeholder="e.g. R-22, aging condenser, low charge suspected">
       </div>
       <div class="btn-row">
-        <button class="btn primary" id="startBtn">Start ${pendingSessionType==='recharge'?'session':'checkup'}</button>
+        <button class="btn primary" id="startBtn">Start ${pendingSessionType==='recharge'?'recharge':'checkup'}</button>
+        <button class="btn ghost" id="cancelSessionStartBtn">Cancel</button>
       </div>
       <div id="baselineErr" class="warn-line" style="display:none;"></div>
     `;
     document.getElementById('typeRechargeBtn').onclick = () => { pendingSessionType='recharge'; renderBaselinePanel(); };
     document.getElementById('typeCheckupBtn').onclick = () => { pendingSessionType='checkup'; renderBaselinePanel(); };
     document.getElementById('startBtn').onclick = onStartSession;
-    const clearBtn = document.getElementById('clearPrefillBtn');
-    if(clearBtn) clearBtn.onclick = () => { baselinePrefill = null; renderAll(); };
-    wireWbHelpers(el);
+    document.getElementById('cancelSessionStartBtn').onclick = onCancelSessionStart;
   } else {
-    const b = active.baseline;
-    const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite()), sltCap: currentSltCap()});
-    const last = rows[rows.length-1];
     const isCheckup = active.type === 'checkup';
     const measuredTotal = sessionMeasuredTotalOz(active);
     el.innerHTML = `
@@ -1962,61 +2742,72 @@ function renderBaselinePanel(){
           <div class="item"><div class="k">Steps logged</div><div class="v">${active.steps.length}</div></div>
         `}
       </div>
-      ${!isCheckup ? `
-      <div class="field-grid" style="margin-top:12px;">
-        ${fieldNumber('startWeightInput','Starting weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:b.startWeight!=null?b.startWeight:''})}
-        ${fieldNumber('finalWeightInput','Final weight',{step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:active.finalWeight!=null?active.finalWeight:''})}
-        <div class="field"><label>&nbsp;</label><button class="btn ghost" id="saveFinalWeightBtn" style="width:100%;">Update weight</button></div>
-      </div>
-      ` : ''}
-      <div class="btn-row">
-        <button class="btn primary" id="archiveBtn">Close ${isCheckup?'checkup':'session'}</button>
-        ${resumedFromArchive ? `<button class="btn ghost" id="cancelResumeBtn">Cancel</button>` : ''}
-      </div>
     `;
-    document.getElementById('archiveBtn').onclick = onArchiveSession;
-    const saveFinalWeightBtn = document.getElementById('saveFinalWeightBtn');
-    if(saveFinalWeightBtn) saveFinalWeightBtn.onclick = onUpdateWeights;
-    const cancelResumeBtn = document.getElementById('cancelResumeBtn');
-    if(cancelResumeBtn) cancelResumeBtn.onclick = onCancelResume;
   }
 }
 
-function onUpdateWeights(){
-  const startV = document.getElementById('startWeightInput').value;
-  const finalV = document.getElementById('finalWeightInput').value;
-  if(startV !== ''){
-    active.baseline.startWeight = Number(startV);
-  }
-  if(finalV !== ''){
-    const now = Date.now();
-    active.finalWeight = Number(finalV);
-    active.finalWeightAt = now;
-    active.finalWeightAtStr = tsStr(now);
-  } else {
-    active.finalWeight = undefined;
-    active.finalWeightAt = undefined;
-    active.finalWeightAtStr = undefined;
-  }
-  saveActive();
-  renderAll();
+// Session-ending actions (Close, Switch to Recharge, Cancel-resume) live in
+// their own panel after Session Log, separate from the "in progress"
+// status card above — keeps the status card purely informational and
+// groups every session-ending action in one place at the end of the flow.
+function renderSessionActionsPanel(){
+  const el = document.getElementById('sessionActionsPanel');
+  if(!active){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  const isCheckup = active.type === 'checkup';
+  const b = active.baseline;
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">Finish up</div>
+    </div>
+    ${!isCheckup ? `
+    <div class="field-grid">
+      ${fieldNumber('startWeightInput','Starting weight',{required:true,step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:b.startWeight!=null?b.startWeight:''})}
+      ${fieldNumber('finalWeightInput','Final weight',{required:true,step:'0.01',placeholder:'lb',note:'jug only, no hoses',value:active.finalWeight!=null?active.finalWeight:''})}
+    </div>
+    <div id="weightErr" class="warn-line" style="display:none;"></div>
+    ` : ''}
+    <div class="btn-row" style="${isCheckup?'':'margin-top:16px;'}">
+      <button class="btn primary" id="archiveBtn">Close ${isCheckup?'checkup':'session'}</button>
+      ${isCheckup ? `<button class="btn ghost" id="switchToRechargeBtn">Switch to Recharge</button>` : ''}
+      ${resumedFromArchive ? `<button class="btn ghost" id="cancelResumeBtn">Cancel</button>` : ''}
+    </div>
+  `;
+  document.getElementById('archiveBtn').onclick = onArchiveSession;
+  const switchToRechargeBtn = document.getElementById('switchToRechargeBtn');
+  if(switchToRechargeBtn) switchToRechargeBtn.onclick = onSuggestRechargeFromCheckup;
+  const cancelResumeBtn = document.getElementById('cancelResumeBtn');
+  if(cancelResumeBtn) cancelResumeBtn.onclick = onCancelResume;
 }
 
 // Epoch ms stays the source of truth for all calculations; timestampStr is
 // just a human-readable companion for anyone opening the exported JSON by hand.
 function tsStr(ms){ return ms ? new Date(ms).toLocaleString() : null; }
 
+// Local (not UTC) YYYY-MM-DD, for filenames. Date#toISOString() is always
+// UTC, so near midnight it can stamp a file with yesterday's or tomorrow's
+// date depending on the user's timezone — this uses the same local
+// calendar date the user would read on their own clock.
+function localDateStamp(ms){
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
 function onStartSession(){
   editingRowIdx = null;
   resumedFromArchive = null;
-  const req = pendingSessionType==='recharge' ? ['bw','blow','bsuction','biwb','bodb'] : ['blow','bsuction','biwb','bodb'];
+  if(!pendingEnvConfirmed) return; // step 2 form shouldn't be reachable without it
+  const req = pendingSessionType==='recharge' ? ['bw','blow','bsuction'] : ['blow','bsuction'];
   const errEl = document.getElementById('baselineErr');
   for(const id of req){
     const v = document.getElementById(id).value;
     if(v===''){
       errEl.textContent = pendingSessionType==='recharge'
-        ? 'Fill in jug weight, low pressure, suction temp, indoor wet-bulb, and outdoor dry-bulb to start.'
-        : 'Fill in low pressure, suction temp, indoor wet-bulb, and outdoor dry-bulb to start.';
+        ? 'Fill in jug weight, low pressure, and suction temp to start.'
+        : 'Fill in low pressure and suction temp to start.';
       errEl.style.display = 'block';
       return;
     }
@@ -2029,26 +2820,71 @@ function onStartSession(){
     lowPsig: Number(document.getElementById('blow').value),
     highPsig: document.getElementById('bhigh').value === '' ? undefined : Number(document.getElementById('bhigh').value),
     suctionTemp: Number(document.getElementById('bsuction').value),
-    outdoorDB: document.getElementById('bodb').value,
-    indoorWB: document.getElementById('biwb').value,
-    indoorDB: document.getElementById('biddb').value,
-    indoorRH: document.getElementById('brh').value,
+    outdoorDB: pendingEnv.outdoorDB,
+    indoorWB: pendingEnv.indoorWB,
+    indoorDB: pendingEnv.indoorDB,
+    indoorRH: pendingEnv.indoorRH,
     liquidTemp: document.getElementById('bliquid').value,
     notes: document.getElementById('bnotes').value,
     timestamp: now,
     timestampStr: tsStr(now)
   };
-  active = { createdAt: now, createdAtStr: tsStr(now), type: pendingSessionType, baseline, steps: [] };
-  baselinePrefill = null;
+  active = { createdAt: now, createdAtStr: tsStr(now), type: pendingSessionType, baseline, steps: [],
+    switchedFromCheckupId: pendingSwitchedFromCheckupId || undefined };
+  pendingEnv = null;
+  pendingEnvConfirmed = false;
+  pendingReadingPrefill = null;
+  pendingSwitchedFromCheckupId = null;
   saveActive();
+  renderAll();
+}
+
+// Fully backs out of starting a session (nothing's been saved yet at this
+// point — active isn't created until onStartSession succeeds): resets
+// pendingEnvConfirmed to false, which un-hides everything sessionInProgress()
+// was hiding and hides the step-2 form again, returning Environmental
+// Parameters to its plain entry form (no Cancel button — there's nothing
+// confirmed to cancel out of anymore). Deliberately leaves pendingEnv's
+// values alone so the form comes back pre-filled instead of blank.
+function onCancelSessionStart(){
+  pendingEnvConfirmed = false;
+  pendingReadingPrefill = null;
+  pendingSwitchedFromCheckupId = null;
+  ambientFormOpen = false;
   renderAll();
 }
 
 async function onArchiveSession(){
   if(!active) return;
+  if(active.type !== 'checkup'){
+    // Save whatever's currently typed in the Finish Up panel's weight
+    // fields (so Close doesn't silently discard an untapped "Update
+    // weight"), then require both before a recharge can actually close —
+    // otherwise there's no way to compute how much refrigerant was added.
+    const startEl = document.getElementById('startWeightInput');
+    const finalEl = document.getElementById('finalWeightInput');
+    if(startEl && startEl.value!=='') active.baseline.startWeight = Number(startEl.value);
+    if(finalEl && finalEl.value!==''){
+      const savedAt = Date.now();
+      active.finalWeight = Number(finalEl.value);
+      active.finalWeightAt = savedAt;
+      active.finalWeightAtStr = tsStr(savedAt);
+    }
+    const startOk = active.baseline.startWeight!=null && !isNaN(active.baseline.startWeight);
+    const finalOk = active.finalWeight!=null && !isNaN(active.finalWeight);
+    if(!startOk || !finalOk){
+      saveActive();
+      const errEl = document.getElementById('weightErr');
+      if(errEl){
+        errEl.textContent = 'Enter both starting and final jug weight before closing this session.';
+        errEl.style.display = 'block';
+      }
+      return;
+    }
+  }
   editingRowIdx = null;
   resumedFromArchive = null;
-  const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite()), sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {predictRate: buildPredictRateForSite(currentSite()), sessionType: active.type, houseSite: currentSite()});
   const last = rows[rows.length-1];
   const measuredTotal = sessionMeasuredTotalOz(active);
   const now = Date.now();
@@ -2062,6 +2898,7 @@ async function onArchiveSession(){
     finalWeight: active.finalWeight!=null ? active.finalWeight : undefined,
     finalWeightAt: active.finalWeightAt || undefined,
     finalWeightAtStr: active.finalWeightAtStr || undefined,
+    switchedFromCheckupId: active.switchedFromCheckupId,
     summary: { totalOz: measuredTotal!==null ? measuredTotal : last.totalOz, finalError: last.shError, stepCount: active.steps.length }
   });
   active = null;
@@ -2072,55 +2909,132 @@ async function onArchiveSession(){
 
 let ambientFormOpen = false;
 
-function renderAmbientPanel(){
-  const el = document.getElementById('ambientPanel');
-  if(!active){ el.style.display='none'; return; }
+// Environmental parameters — one shared panel/section for both checkup and
+// recharge, in three states: (1) no active session and nothing confirmed
+// yet — the step-1 entry form; (2) no active session, confirmed
+// (pendingEnv set) — collapsed summary + Edit, before "record first
+// reading" (baseline panel step 2) can proceed; (3) active session —
+// collapsed summary + Update, same as before, still backed by an
+// ambientOnly step so history/forward-fill work exactly as they did.
+function renderEnvPanel(){
+  const el = document.getElementById('envPanel');
+  if(!currentSite()){ el.style.display='none'; return; }
   el.style.display = 'block';
-  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
-  const last = rows[rows.length-1];
-  const ambientRows = rows.filter(r => r.ambientProvided);
-  const lastAmbientRow = ambientRows[ambientRows.length-1];
-  const stepsSince = last.idx - lastAmbientRow.idx;
-  const hint = stepsSince>=3
-    ? `<div class="ambient-hint">Confirmed ${stepsSince} steps ago — worth rechecking if the weather, load, or airflow has shifted since then.</div>`
-    : '';
+
+  if(active){
+    const rows = resolveFields(active.baseline, active.steps, {sessionType: active.type, houseSite: currentSite()});
+    const last = rows[rows.length-1];
+    const ambientRows = rows.filter(r => r.ambientProvided);
+    const lastAmbientRow = ambientRows[ambientRows.length-1];
+    const stepsSince = last.idx - lastAmbientRow.idx;
+    const hint = stepsSince>=3
+      ? `<div class="ambient-hint">Confirmed ${stepsSince} steps ago — worth rechecking if the weather, load, or airflow has shifted since then.</div>`
+      : '';
+
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">Environmental parameters</div>
+        <span class="tag">Used for target superheat</span>
+      </div>
+      <div class="ambient-summary">
+        <div class="txt">
+          ODDB <b>${fmt1(last.outdoorDB)}°F</b> · IDWB <b>${fmt1(last.indoorWB)}°F</b><br>
+          <span style="color:var(--text-faint)">Last confirmed at ${lastAmbientRow.isBaseline ? 'baseline' : 'step '+lastAmbientRow.idx}</span>
+        </div>
+        <button class="btn ghost" id="ambientToggleBtn">${ambientFormOpen ? 'Cancel' : 'Update'}</button>
+      </div>
+      ${hint}
+      ${ambientFormOpen ? `
+        <div class="ambient-form">
+          <p class="subhead" style="margin:0 0 12px;">Only edit what's changed — everything else stays as last logged, this just refreshes conditions.</p>
+          <div class="field-grid">
+            ${fieldNumber('aodb','Outdoor dry-bulb (ODDB)',{step:'0.1',value:numOrEmpty(last.outdoorDB)})}
+            ${fieldNumber('aiwb','Indoor wet-bulb (IDWB)',{step:'0.1',value:numOrEmpty(last.indoorWB)})}
+          </div>
+          ${wbHelperBlock('a','aiwb',{iddbValue:numOrEmpty(last.indoorDB),rhValue:numOrEmpty(last.indoorRH)})}
+          <div class="btn-row">
+            <button class="btn primary" id="ambientSaveBtn">Save updated conditions</button>
+          </div>
+        </div>
+      ` : ''}
+    `;
+    document.getElementById('ambientToggleBtn').onclick = () => { ambientFormOpen = !ambientFormOpen; renderEnvPanel(); };
+    const saveBtn = document.getElementById('ambientSaveBtn');
+    if(saveBtn) saveBtn.onclick = onAmbientRecheck;
+    wireWbHelpers(el);
+    return;
+  }
+
+  if(!pendingEnvConfirmed || ambientFormOpen){
+    // Cancel only makes sense here when we're editing an ALREADY-confirmed
+    // pendingEnv (reached via the "Edit" button below, on the collapsed
+    // summary) — there's a confirmed state to cancel back out to. Reached
+    // via a fresh start or onCancelSessionStart's full reset
+    // (pendingEnvConfirmed already false), there's nothing to cancel out
+    // of, so no button and the label reads "Start Session" rather than
+    // "Save" — even though pendingEnv's values are still pre-filled below.
+    const editingConfirmed = pendingEnvConfirmed && ambientFormOpen;
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">Environmental parameters</div>
+        <span class="tag">Step 1</span>
+      </div>
+      <p class="subhead" style="margin-top:-6px;">Measure once before heading out to the condenser — sets the target superheat for every reading this session, and carries forward automatically if you switch a checkup into a recharge.</p>
+      <div class="field-grid" style="grid-template-columns:1fr 1fr;">
+        ${fieldNumber('eodb','ODDB — Outdoor dry-bulb',{required:true,step:'0.1',placeholder:'°F',value:pendingEnv?numOrEmpty(pendingEnv.outdoorDB):''})}
+        ${fieldNumber('eiwb','IDWB — Indoor wet-bulb',{required:true,step:'0.1',placeholder:'°F',value:pendingEnv?numOrEmpty(pendingEnv.indoorWB):''})}
+      </div>
+      ${wbHelperBlock('e','eiwb',{abbrevLabels:true, iddbValue:pendingEnv?numOrEmpty(pendingEnv.indoorDB):undefined, rhValue:pendingEnv?numOrEmpty(pendingEnv.indoorRH):undefined})}
+      <div class="btn-row">
+        <button class="btn primary" id="envConfirmBtn">${editingConfirmed?'Save':'Start Session'}</button>
+        ${editingConfirmed ? `<button class="btn ghost" id="envCancelEditBtn">Cancel</button>` : ''}
+      </div>
+      <div id="envErr" class="warn-line" style="display:none;"></div>
+    `;
+    document.getElementById('envConfirmBtn').onclick = onConfirmEnv;
+    const cancelBtn = document.getElementById('envCancelEditBtn');
+    // renderAll(), not just renderEnvPanel() — the baseline panel's step-2
+    // form visibility also depends on ambientFormOpen now (see
+    // renderBaselinePanel), so it needs to re-sync too.
+    if(cancelBtn) cancelBtn.onclick = () => { ambientFormOpen = false; renderAll(); };
+    wireWbHelpers(el);
+    return;
+  }
 
   el.innerHTML = `
     <div class="panel-head">
-      <div class="panel-title">Ambient conditions</div>
-      <span class="tag">Used for target superheat</span>
+      <div class="panel-title">Environmental parameters</div>
+      <span class="tag">Set</span>
     </div>
     <div class="ambient-summary">
-      <div class="txt">
-        ODDB <b>${fmt1(last.outdoorDB)}°F</b> · IDWB <b>${fmt1(last.indoorWB)}°F</b> · LLT <b>${fmt1(last.liquidTemp)}°F</b><br>
-        <span style="color:var(--text-faint)">Last confirmed at ${lastAmbientRow.isBaseline ? 'baseline' : 'step '+lastAmbientRow.idx}</span>
-      </div>
-      <button class="btn ghost" id="ambientToggleBtn">${ambientFormOpen ? 'Cancel' : 'Recheck now'}</button>
+      <div class="txt">ODDB <b>${fmt1(pendingEnv.outdoorDB)}°F</b> · IDWB <b>${fmt1(pendingEnv.indoorWB)}°F</b></div>
+      <button class="btn ghost" id="envEditBtn">Edit</button>
     </div>
-    ${hint}
-    ${ambientFormOpen ? `
-      <div class="ambient-form">
-        <p class="subhead" style="margin:0 0 12px;">Only edit what's changed — everything else stays as last logged, this just refreshes conditions.</p>
-        <div class="field-grid">
-          ${fieldNumber('aodb','Outdoor dry-bulb (ODDB)',{step:'0.1',value:numOrEmpty(last.outdoorDB)})}
-          ${fieldNumber('aiwb','Indoor wet-bulb (IDWB)',{step:'0.1',value:numOrEmpty(last.indoorWB)})}
-          ${fieldNumber('aliquid','Liquid line temp (LLT)',{step:'0.1',value:numOrEmpty(last.liquidTemp)})}
-        </div>
-        ${wbHelperBlock('a','aiwb',{iddbValue:numOrEmpty(last.indoorDB),rhValue:numOrEmpty(last.indoorRH)})}
-        <div class="btn-row">
-          <button class="btn primary" id="ambientSaveBtn">Save updated conditions</button>
-        </div>
-      </div>
-    ` : ''}
   `;
-  document.getElementById('ambientToggleBtn').onclick = () => { ambientFormOpen = !ambientFormOpen; renderAmbientPanel(); };
-  const saveBtn = document.getElementById('ambientSaveBtn');
-  if(saveBtn) saveBtn.onclick = onAmbientRecheck;
-  wireWbHelpers(el);
+  document.getElementById('envEditBtn').onclick = () => { ambientFormOpen = true; renderAll(); };
+}
+
+function onConfirmEnv(){
+  const errEl = document.getElementById('envErr');
+  const odbV = document.getElementById('eodb').value, iwbV = document.getElementById('eiwb').value;
+  if(odbV==='' || iwbV===''){
+    errEl.textContent = 'Fill in outdoor dry-bulb and indoor wet-bulb to continue.';
+    errEl.style.display = 'block';
+    return;
+  }
+  pendingEnv = {
+    outdoorDB: odbV,
+    indoorWB: iwbV,
+    indoorDB: document.getElementById('eiddb').value,
+    indoorRH: document.getElementById('erh').value
+  };
+  pendingEnvConfirmed = true;
+  ambientFormOpen = false;
+  renderAll();
 }
 
 function onAmbientRecheck(){
-  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {sessionType: active.type, houseSite: currentSite()});
   const last = rows[rows.length-1];
   const now = Date.now();
   const entry = {
@@ -2131,7 +3045,6 @@ function onAmbientRecheck(){
     indoorWB: document.getElementById('aiwb').value,
     indoorDB: document.getElementById('aiddb').value,
     indoorRH: document.getElementById('arh').value,
-    liquidTemp: document.getElementById('aliquid').value,
     notes: 'Ambient conditions recheck',
     ambientOnly: true,
     timestamp: now,
@@ -2148,7 +3061,7 @@ function renderStepPanel(){
   if(!active){ el.style.display='none'; return; }
   el.style.display = 'block';
   const isCheckup = active.type === 'checkup';
-  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {sessionType: active.type, houseSite: currentSite()});
   const last = rows[rows.length-1];
 
   el.innerHTML = `
@@ -2157,8 +3070,8 @@ function renderStepPanel(){
       <span class="tag">After stabilizing 5–10 min${isCheckup?'':', manifold valve closed'}</span>
     </div>
     <div class="field-grid" style="grid-template-columns:1fr 1fr;">
-      ${fieldNumber('slow','Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig',note:`last: ${fmt1(last.lowPsig)}`})}
-      ${fieldNumber('shigh','High-side pressure',{required:true,tone:'high',step:'1',placeholder:'psig',note:`last: ${fmt1(last.highPsig)}`})}
+      ${fieldNumber('slow','Low-side pressure (LOW)',{required:true,tone:'low',step:'1',placeholder:'psig',note:`last: ${fmt1(last.lowPsig)}`})}
+      ${fieldNumber('shigh','High-side pressure (HIGH)',{required:true,tone:'high',step:'1',placeholder:'psig',note:`last: ${fmt1(last.highPsig)}`})}
       ${fieldNumber('ssuction','Suction line temp (SLT)',{required:true,step:'0.1',placeholder:'°F',note:`last: ${fmt1(last.suctionTemp)}°F`})}
       ${fieldNumber('sliquid','Liquid line temp (LLT)',{step:'0.1',placeholder:`${fmt1(last.liquidTemp)}`,optLabel:'optional'})}
     </div>
@@ -2169,18 +3082,6 @@ function renderStepPanel(){
         <div class="field-note" style="margin:0;">only if you can weigh mid-charge — enter the jug+hoses weight, or if your scale has a Tare button, zero it at your first weighed reading and enter the running total it shows from then on (negative is fine, we just track the size of the change)</div>
       </div>
     </div>
-    <details class="more">
-      <summary>Other readings — reused from last step unless changed</summary>
-      <div class="field-grid" style="grid-template-columns:1fr 1fr;">
-        ${fieldNumber('sodb','Outdoor dry-bulb (ODDB)',{step:'0.1',placeholder:`${fmt1(last.outdoorDB)}`})}
-        ${fieldNumber('siwb','Indoor wet-bulb (IDWB)',{step:'0.1',placeholder:`${fmt1(last.indoorWB)}`})}
-      </div>
-      ${wbHelperBlock('s','siwb',{iddbPlaceholder:fmt1(last.indoorDB),rhPlaceholder:fmt1(last.indoorRH)})}
-      <div class="field" style="margin-top:12px;">
-        <label>Notes<span class="opt">optional</span></label>
-        <input type="text" id="snotes" placeholder="anything worth remembering about this step">
-      </div>
-    </details>
     <div class="btn-row">
       <button class="btn primary" id="addStepBtn">Log this reading</button>
       ${active.steps.length>0 ? '<button class="btn danger" id="undoStepBtn">Undo last step</button>' : ''}
@@ -2189,7 +3090,6 @@ function renderStepPanel(){
   `;
   document.getElementById('addStepBtn').onclick = onAddStep;
   if(document.getElementById('undoStepBtn')) document.getElementById('undoStepBtn').onclick = onUndoStep;
-  wireWbHelpers(el);
 }
 
 function onAddStep(){
@@ -2210,12 +3110,7 @@ function onAddStep(){
     highPsig: Number(document.getElementById('shigh').value),
     suctionTemp: Number(document.getElementById('ssuction').value),
     stepWeight: weightVal==='' ? undefined : Number(weightVal),
-    outdoorDB: document.getElementById('sodb').value,
-    indoorWB: document.getElementById('siwb').value,
-    indoorDB: document.getElementById('siddb').value,
-    indoorRH: document.getElementById('srh').value,
     liquidTemp: document.getElementById('sliquid').value,
-    notes: document.getElementById('snotes').value,
     timestamp: now,
     timestampStr: tsStr(now)
   };
@@ -2246,7 +3141,7 @@ function renderResultsPanel(){
   el.style.display = 'block';
   const isCheckup = active.type === 'checkup';
   const predictRate = buildPredictRateForSite(currentSite());
-  const rows = resolveFields(active.baseline, active.steps, {predictRate, sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {predictRate, sessionType: active.type, houseSite: currentSite()});
   const row = rows[rows.length-1];
   const reco = recommendation(row, active.type);
   const recoClass = {add:'add',stop:'stop',warn:'warn',idle:'idle'}[reco.level];
@@ -2291,24 +3186,20 @@ function renderResultsPanel(){
         <div class="ro"><div class="k">SH — Actual superheat</div><div class="v">${fmt1(row.actualSH)}°F</div></div>
         <div class="ro"><div class="k">LOW — Low-side pressure</div><div class="v low">${fmt1(row.lowPsig)} psig</div></div>
         <div class="ro"><div class="k">TSH — Target superheat</div><div class="v">${fmt1(row.targetSH)}°F</div></div>
-        <div class="ro"><div class="k">TLOW — Target low-side pressure${row.targetLowPsigSource==='theoretical'?' (rough, first reading)':''}</div><div class="v low">${row.targetLowPsig===null?'—':Math.round(row.targetLowPsig)+' psig'}</div></div>
+        <div class="ro"><div class="k">TLOW — Target low-side pressure${row.targetLowPsigSource==='one-endpoint'?' (rough, one endpoint)':row.targetLowPsigSource==='one-endpoint-default'?' (one endpoint, default slopes)':row.targetLowPsigSource==='provisional-path-assisted'?' (provisional)':row.targetLowPsigSource==='provisional-default-assisted'?' (provisional, default-assisted)':row.targetLowPsigSource==='default-model'?' (default model, unconfirmed)':''}</div><div class="v low">${row.targetLowPsig===null?'—':fmt1(row.targetLowPsig)+' psig'}</div></div>
       </div>
     </div>
+    ${row.bootstrapGuidance ? `<div class="status-line" style="margin-top:8px;">TLOW: no completed recharge at this site has finished close to target yet — <b>${row.bootstrapGuidance.mode}</b>: ${row.bootstrapGuidance.instruction}</div>` : ''}
     <div class="reco ${recoClass}">
       <div style="flex:1;">
         <div class="rt">${reco.title}</div>
         <div class="rs">${reco.sub}</div>
         ${addedEstLine}
-        ${isCheckup && reco.level==='add' ? `
-          <div class="btn-row" style="margin-top:12px;">
-            <button class="btn primary" id="suggestRechargeBtn">Start a recharge session</button>
-          </div>
-        ` : ''}
       </div>
     </div>
     ${!isCheckup && reco.level==='add' ? `
       <div class="timer">
-        <button class="btn ghost" id="timerBtn">Start 8-min stabilization timer</button>
+        <button class="btn ghost" id="timerBtn">Start 5-min stabilization timer</button>
         <span class="clock" id="timerClock"></span>
       </div>
     ` : ''}
@@ -2340,17 +3231,26 @@ function renderResultsPanel(){
     </div>
   `;
   const timerBtn = document.getElementById('timerBtn');
-  if(timerBtn) timerBtn.onclick = () => startTimer(8*60);
-  const suggestRechargeBtn = document.getElementById('suggestRechargeBtn');
-  if(suggestRechargeBtn) suggestRechargeBtn.onclick = onSuggestRechargeFromCheckup;
+  if(timerBtn) timerBtn.onclick = () => startTimer(5*60);
   renderTimer();
 }
 
+// Closes the current checkup and immediately opens a new recharge's
+// step-2 "first reading" form pre-filled with the checkup's last full
+// reading (LOW/HIGH/SLT/LLT) and environmental parameters — so the just-
+// measured state becomes the recharge's starting point instead of
+// re-measuring. Callable any time during an active checkup (not gated on
+// what the recommendation says), via the "Switch to Recharge" button in
+// the baseline panel's in-progress section.
 async function onSuggestRechargeFromCheckup(){
   if(!active || active.type !== 'checkup') return;
-  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {sessionType: active.type, houseSite: currentSite()});
   const last = rows[rows.length-1];
-  baselinePrefill = { outdoorDB: last.outdoorDB, indoorWB: last.indoorWB };
+  pendingEnv = { outdoorDB: last.outdoorDB, indoorWB: last.indoorWB, indoorDB: last.indoorDB, indoorRH: last.indoorRH };
+  pendingEnvConfirmed = true;
+  pendingReadingPrefill = { lowPsig: last.lowPsig, highPsig: last.highPsig, suctionTemp: last.suctionTemp, liquidTemp: last.liquidTemp };
+  pendingSwitchedFromCheckupId = active.createdAt;
+  ambientFormOpen = false;
   pendingSessionType = 'recharge';
   await onArchiveSession();
   const anchor = document.getElementById('typeRechargeBtn') || document.getElementById('bw');
@@ -2416,9 +3316,12 @@ function renderLogTable(rows){
 
 function renderChartsPanel(){
   const el = document.getElementById('chartsPanel');
-  if(!active){ el.style.display='none'; return; }
+  // Checkups don't add refrigerant, so a "charging trend" (SH deviation
+  // as charge is added, the LOW-vs-SLT model) doesn't apply — just the
+  // Session Log there instead.
+  if(!active || active.type==='checkup'){ el.style.display='none'; return; }
   el.style.display = 'block';
-  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {sessionType: active.type, houseSite: currentSite()});
 
   if(rows.length < 2){
     el.innerHTML = `
@@ -2431,24 +3334,19 @@ function renderChartsPanel(){
     return;
   }
 
-  const devChart = chartWithAxisLabels(buildDeviationChart(rows), 'Low-side pressure (psig)', 'SH deviation (°F)');
-  const sltCap = currentSltCap();
-  const lowSltChart = chartWithAxisLabels(buildLowSltFitChart(rows, sltCap), 'Low-side pressure (psig)', 'SLT (°F)');
+  const chartSite = currentSite();
+  const houseModel = fitHouseModel(loadHouseModelPoints(chartSite), chartSite.id);
+  const devChart = chartWithAxisLabels(buildDeviationChart(rows, houseModel), 'Low-side pressure (psig)', 'SH deviation (°F)');
   const lastSource = rows[rows.length-1].targetLowPsigSource;
 
   el.innerHTML = `
     <div class="panel-head">
       <div class="panel-title">Charging trend</div>
     </div>
-    <div class="chart-block">
-      <div class="chart-title">SH deviation</div>
-      <div class="chart-sub">Dots are actual readings; the amber line is the same fitted trend TLOW is solved from. Should trend toward 0 (green band) as refrigerant is added — points can zig-zag with pressure near equilibrium, but the fitted line shows the real trend underneath.</div>
+    <div class="chart-block" style="margin-bottom:0;">
+      <div class="chart-title">SH deviation (Gi)</div>
+      <div class="chart-sub">Dots are actual readings; the amber line is the same fitted trend TLOW is solved from${lastSource==='bootstrap'?' — no curve yet, see the guidance above instead':''}. Should trend toward 0 (green band) as refrigerant is added — points can zig-zag with pressure near equilibrium, but the fitted line shows the real trend underneath.</div>
       ${devChart || '<div class="chart-empty">Not enough data yet.</div>'}
-    </div>
-    <div class="chart-block">
-      <div class="chart-title">LOW vs SLT — the model behind TLOW</div>
-      <div class="chart-sub">Dots are this session's actual readings; the amber line is the fitted trend (${lastSource||'—'}) TLOW is solved from. The dashed line is this site's assumed max healthy SLT (${sltCap}°F) — TLOW never recommends more pressure than that cap implies.</div>
-      ${lowSltChart || '<div class="chart-empty">Not enough data yet.</div>'}
     </div>
   `;
 }
@@ -2459,7 +3357,7 @@ function renderHistoryPanel(){
   const el = document.getElementById('historyPanel');
   if(!active){ el.style.display='none'; return; }
   el.style.display = 'block';
-  const rows = resolveFields(active.baseline, active.steps, {sltCap: currentSltCap()});
+  const rows = resolveFields(active.baseline, active.steps, {sessionType: active.type, houseSite: currentSite()});
   const isCheckup = active.type === 'checkup';
   const measuredTotal = sessionMeasuredTotalOz(active);
   const weightSummary = !isCheckup ? `
@@ -2508,9 +3406,9 @@ function renderEditRowForm(rowIdx){
   const weightVal = isBaseline ? target.baseWeight : target.stepWeight;
   const rawVal = v => (v!==undefined && v!==null) ? v : '';
   return `
-    <div class="field-grid" style="margin-top:12px;">
-      ${fieldNumber('erowLow','Low-side pressure',{required:true,tone:'low',step:'1',placeholder:'psig',value:rawVal(target.lowPsig)})}
-      ${fieldNumber('erowHigh','High-side pressure',{required:true,tone:'high',step:'1',placeholder:'psig',value:rawVal(target.highPsig)})}
+    <div class="field-grid" style="grid-template-columns:1fr 1fr;margin-top:12px;">
+      ${fieldNumber('erowLow','Low-side pressure (LOW)',{required:true,tone:'low',step:'1',placeholder:'psig',value:rawVal(target.lowPsig)})}
+      ${fieldNumber('erowHigh','High-side pressure (HIGH)',{required:true,tone:'high',step:'1',placeholder:'psig',value:rawVal(target.highPsig)})}
       ${fieldNumber('erowSlt','Suction line temp (SLT)',{required:true,step:'0.1',placeholder:'°F',value:rawVal(target.suctionTemp)})}
       ${fieldNumber('erowLlt','Liquid line temp (LLT)',{step:'0.1',placeholder:'°F',optLabel:'optional',value:rawVal(target.liquidTemp)})}
     </div>
@@ -2603,24 +3501,22 @@ let archiveSelectedIdx = null;
 // Resume (which converts it back to active, and previously the only way
 // out was Close, which stamps a brand new closedAt over the original).
 function renderArchiveSessionDetail(session){
-  const rows = resolveFields(session.baseline, session.steps, {sltCap: currentSltCap()});
-  const devChart = chartWithAxisLabels(buildDeviationChart(rows), 'Low-side pressure (psig)', 'SH deviation (°F)');
-  const lowSltChart = chartWithAxisLabels(buildLowSltFitChart(rows, currentSltCap()), 'Low-side pressure (psig)', 'SLT (°F)');
+  const site = currentSite();
+  const rows = resolveFields(session.baseline, session.steps, {houseSite: site});
+  const houseModel = fitHouseModel(loadHouseModelPoints(site), site.id);
+  const devChart = chartWithAxisLabels(buildDeviationChart(rows, houseModel), 'Low-side pressure (psig)', 'SH deviation (°F)');
   return `
     ${renderLogTable(rows)}
-    <div class="chart-block" style="margin-top:16px;">
+    <div class="chart-block" style="margin-top:16px;margin-bottom:0;">
       <div class="chart-title">SH deviation</div>
       ${devChart || '<div class="chart-empty">Not enough data yet.</div>'}
-    </div>
-    <div class="chart-block">
-      <div class="chart-title">LOW vs SLT — the model behind TLOW</div>
-      ${lowSltChart || '<div class="chart-empty">Not enough data yet.</div>'}
     </div>
   `;
 }
 
 function renderArchivePanel(){
   const el = document.getElementById('archivePanel');
+  if(sessionInProgress()){ el.style.display='none'; return; }
   if(archive.length===0){ el.style.display='none'; return; }
   el.style.display = 'block';
   const busy = !!active;
@@ -2691,9 +3587,26 @@ function renderArchivePanel(){
 
 function renderSiteTrendPanel(){
   const el = document.getElementById('siteTrendPanel');
+  if(sessionInProgress()){ el.style.display='none'; return; }
   const site = currentSite();
   if(!site || (site.archive || []).length===0){ el.style.display='none'; return; }
   el.style.display = 'block';
+
+  const rechargeCount = (site.archive||[]).filter(s=>s.type!=='checkup').length;
+
+  if(!siteTrendOpen){
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">Site trend</div>
+        <span class="tag">${rechargeCount} recharge${rechargeCount===1?'':'s'} on record</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost" id="siteTrendToggleBtn">Show trend</button>
+      </div>
+    `;
+    document.getElementById('siteTrendToggleBtn').onclick = () => { siteTrendOpen = true; renderSiteTrendPanel(); };
+    return;
+  }
 
   // Share one x-domain (spanning every session, recharge or checkup)
   // across both charts below, so a checkup that's more recent than the
@@ -2706,18 +3619,17 @@ function renderSiteTrendPanel(){
   const rateChart = chartWithAxisLabels(buildLeakRateTrendChart(site, xDomain), '', 'Lb lost/month');
   const devChart = chartWithAxisLabels(buildDeviationTrendChart(site, xDomain), '', 'SH deviation (°F)');
   const forecast = computeLeakForecast(site);
-  const rechargeCount = (site.archive||[]).filter(s=>s.type!=='checkup').length;
 
   let forecastHtml = '';
   if(forecast.possible){
-    const floorNote = forecast.singleRechargeFloor
-      ? ` This is based on a single recharge with no prior "full charge" date on record, so it assumes that recharge covered at least the last 30 days of loss — the real rate could be lower if the leak has actually been going on longer.`
-      : ` The earliest recharge on record uses that same 30-day floor assumption since there's no prior "full charge" date for it; later recharges use the actual measured interval.`;
+    const skippedNote = forecast.unratedRecharges>0
+      ? ` ${forecast.unratedRecharges} recharge${forecast.unratedRecharges===1?'':'s'} on record couldn't be used for the rate — no confirmed fully-charged reading (checkup or recharge that finished in range) existed beforehand to measure the discharge time from.`
+      : '';
     forecastHtml = `
       <div class="reco add" style="margin-top:6px;">
         <div style="flex:1;">
           <div class="rt">Rough estimate: next recharge around ${forecast.projectedDate.toLocaleDateString([], {month:'long',day:'numeric',year:'numeric'})}</div>
-          <div class="rs">Based on ~${lbOnly(forecast.ozPerMonth)}/month lost across ${forecast.basedOnIntervals} recharge${forecast.basedOnIntervals===1?'':'s'} on record, and this site's typical recharge size of ~${lbOnly(forecast.typicalTriggerOz)}. It's been ${Math.round(forecast.daysSinceLast)} days since the last recharge, so roughly ${lbOnly(forecast.currentDeficitEstimate)} has likely leaked back out already.${floorNote}</div>
+          <div class="rs">Based on ~${lbOnly(forecast.ozPerMonth)}/month lost across ${forecast.basedOnIntervals} measured interval${forecast.basedOnIntervals===1?'':'s'} (each starting from a confirmed fully-charged reading), and this site's typical recharge size of ~${lbOnly(forecast.typicalTriggerOz)}. It's been ${Math.round(forecast.daysSinceLast)} days since the last recharge, so roughly ${lbOnly(forecast.currentDeficitEstimate)} has likely leaked back out already.${skippedNote}</div>
         </div>
       </div>
     `;
@@ -2732,8 +3644,8 @@ function renderSiteTrendPanel(){
     </div>
     <div class="chart-block">
       <div class="chart-title">Lb lost per month, over time</div>
-      <div class="chart-sub">Flat or falling is a stable system. Rising suggests the leak is getting worse. The earliest point is a conservative floor (see note below), not a direct measurement.</div>
-      ${rateChart || '<div class="chart-empty">No completed recharges yet.</div>'}
+      <div class="chart-sub">Flat or falling is a stable system. Rising suggests the leak is getting worse. Each point needs a confirmed fully-charged reading before it to measure a real interval from — a recharge with no such reading beforehand (often the first one on record) is left off rather than guessed at.</div>
+      ${rateChart || '<div class="chart-empty">No measurable interval yet — need a confirmed fully-charged reading before a recharge to measure how long it took to leak back out.</div>'}
     </div>
     <div class="chart-block">
       <div class="chart-title">As-found SH deviation</div>
@@ -2744,12 +3656,276 @@ function renderSiteTrendPanel(){
       </div>
       ${devChart || '<div class="chart-empty">No sessions yet.</div>'}
     </div>
-    <div class="chart-block" style="margin-bottom:0;">
+    <div class="chart-block">
       <div class="chart-title">Time-to-next-recharge estimate</div>
       ${forecastHtml}
       <div class="status-line">Rough projection only — assumes each recharge fully corrected the system to target, and that the leak rate stays constant. Treat as a planning guide, not a guarantee.</div>
     </div>
+    <div class="btn-row" style="margin-bottom:0;">
+      <button class="btn ghost" id="siteTrendToggleBtn">Hide</button>
+    </div>
   `;
+  document.getElementById('siteTrendToggleBtn').onclick = () => { siteTrendOpen = false; renderSiteTrendPanel(); };
+}
+
+const SESSION_PALETTE = ['var(--low)','var(--amber)','var(--green)','#9B7FE0','#4CC9C0','#E07B9B','#C9A15A','var(--red)'];
+
+// One color per recharge session that actually has a chartable (non-
+// 'outside') point, assigned in first-appearance order — shared between
+// buildGiVnChart and the "Readings used" table so a session's dots and
+// its table rows can be matched by color instead of a per-session legend
+// entry or a connecting line, both of which get unreadable once more
+// than a handful of recharges accumulate. Sessions with zero chartable
+// points (nothing to match in the chart) are left uncolored.
+function sessionColorMap(points){
+  const map = new Map();
+  let colorIdx = 0;
+  points.forEach(p => {
+    if(p.sessionType!=='recharge' || p.status==='outside') return;
+    if(!map.has(p.sessionId)){
+      map.set(p.sessionId, SESSION_PALETTE[colorIdx % SESSION_PALETTE.length]);
+      colorIdx++;
+    }
+  });
+  return map;
+}
+
+// The "Gi=H(Vn) with data for review" plot: every in-range point
+// normalized into Vn, one color per recharge session (dots only — no
+// connecting lines, which turn into unreadable spaghetti once several
+// recharges overlap in Vn range; match a session to its color via the
+// "Readings used" table instead), checkups shown as unconnected gray
+// dots, the common monotonic H(Vn) curve drawn first so session/checkup
+// dots always sit on top of it, a horizontal Gi=0 target line and a
+// vertical Vn=R target line — mirrors r22_charge_model.py's
+// make_normalized_plot.
+// Marker shape encodes point classification (same meaning everywhere a
+// classification is shown, e.g. buildPointsTableHtml's Status column);
+// color encodes session/checkup, same as before. 'outlier' has no shape
+// of its own — it stays a dot, same as 'path' — since it's still shown
+// in the same color as the rest of its session.
+const V4_STATUS_SHAPE = {path:'circle', plateau:'plus', outside:'x', outlier:'circle'};
+
+function buildGiVnChart(model, points){
+  // Points below VSAT_MIN are outside the model's normal domain (possible
+  // freeze/transient regime — see §7.1 of the house-model doc) and aren't
+  // meaningful on the normalized Vn axis; leave them out entirely rather
+  // than showing them with an 'x' marker.
+  const plotted = points.filter(p => p.status !== 'outside');
+  if(plotted.length===0) return null;
+
+  plotted.forEach(p => {
+    if(p.vnF===null || p.vnF===undefined) p.vnF = normalizedVsat(p.vsatF, p.idwbF, p.oddbF, model.target);
+  });
+
+  const series = [];
+  const legendItems = [];
+
+  if(model.path && model.path.available){
+    const vns = plotted.map(p=>p.vnF);
+    const xmin = Math.min(...vns) - 0.5;
+    const xmax = Math.max(Math.max(...vns)+0.5, model.target.RF+0.6);
+    const curvePts = [];
+    for(let i=0;i<=60;i++){
+      const x = xmin + (xmax-xmin)*i/60;
+      curvePts.push({x, y: pathH(x, model.path.B, model.path.CF, model.path.WF, model.target.RF)});
+    }
+    series.push({label:'Common H(Vn)', color:'var(--text)', points:curvePts, noDots:true});
+    legendItems.push({label:'Common H(Vn) — fitted curve', color:'var(--text)'});
+  }
+
+  const colorMap = sessionColorMap(points);
+  const bySessionStatus = new Map();
+  plotted.forEach(p => {
+    if(p.sessionType!=='recharge') return;
+    const key = p.sessionId+'|'+p.status;
+    if(!bySessionStatus.has(key)) bySessionStatus.set(key, []);
+    bySessionStatus.get(key).push(p);
+  });
+  bySessionStatus.forEach(pts => {
+    const p0 = pts[0];
+    series.push({ color: colorMap.get(p0.sessionId) || 'var(--text-faint)', shape: V4_STATUS_SHAPE[p0.status]||'circle', points: pts.map(p=>({x:p.vnF, y:p.giF})), noLine:true });
+  });
+
+  const checkupByStatus = new Map();
+  plotted.forEach(p => {
+    if(p.sessionType==='recharge') return;
+    if(!checkupByStatus.has(p.status)) checkupByStatus.set(p.status, []);
+    checkupByStatus.get(p.status).push(p);
+  });
+  if(checkupByStatus.size){
+    checkupByStatus.forEach((pts, status) => {
+      series.push({ color:'var(--text-faint)', shape: V4_STATUS_SHAPE[status]||'circle', points: pts.map(p=>({x:p.vnF, y:p.giF})), noLine:true });
+    });
+    legendItems.push({label:'Checkups', color:'var(--text-faint)'});
+  }
+
+  legendItems.push({label:'Path point', color:'var(--text-dim)', shape:'circle'});
+  legendItems.push({label:'IDWB plateau', color:'var(--text-dim)', shape:'plus'});
+  legendItems.push({label:'Gi = 0 (on target)', color:'var(--text-faint)', dashed:true});
+  legendItems.push({label:'Vn = R (normalized target)', color:'var(--low)', dashed:true});
+
+  const svg = buildLineChart(series, {
+    zeroLine: true,
+    vLine: model.target.RF,
+    xLabelFn: v => String(Math.round(v)),
+    xIntegerTicks: true
+  });
+  return svg ? { svg, legendItems } : null;
+}
+
+function buildEndpointsTableHtml(endpoints){
+  if(!endpoints.length) return '<div class="chart-empty">No completed recharge sessions on record yet.</div>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Date</th><th>VSAT</th><th>Low</th><th>SLT</th><th>IDWB</th><th>ODDB</th><th>Gi</th><th>Status</th></tr></thead>
+        <tbody>
+          ${endpoints.map(e => `<tr>
+            <td>${e.date||'—'}</td>
+            <td>${fmt1(e.vsatF)}°F</td>
+            <td style="color:var(--low)">${fmt1(e.lowPsig)}</td>
+            <td>${fmt1(e.sltF)}°F</td>
+            <td>${fmt1(e.idwbF)}°F</td>
+            <td>${fmt1(e.oddbF)}°F</td>
+            <td>${(e.giF>0?'+':'')+fmt1(e.giF)}</td>
+            <td style="color:${e.accepted?'var(--green)':'var(--red)'}">${e.accepted?'accepted':'rejected — '+e.reason}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function buildPointsTableHtml(points){
+  if(!points.length) return '<div class="chart-empty">No historical readings recorded yet.</div>';
+  const statusColor = {path:'var(--low)', plateau:'var(--amber)', outlier:'var(--red)', outside:'var(--text-faint)'};
+  // Same per-session colors as the Gi=H(Vn) chart's dots (checkups share
+  // its gray) — lets a row be matched to its chart dots by color, now
+  // that the chart has neither connecting lines nor a per-session legend.
+  const colorMap = sessionColorMap(points);
+  const dateColor = p => p.sessionType!=='recharge' ? 'var(--text-faint)' : (colorMap.get(p.sessionId) || 'inherit');
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Date</th><th>Type</th><th>Stage</th><th>Low</th><th>VSAT</th><th>SLT</th><th>IDWB</th><th>ODDB</th><th>Gi</th><th>Fit</th><th>Resid.</th><th>Status</th></tr></thead>
+        <tbody>
+          ${points.map(p => `<tr>
+            <td style="color:${dateColor(p)}">${p.date||'—'}</td>
+            <td>${p.sessionType}</td>
+            <td>${p.stage}</td>
+            <td style="color:var(--low)">${fmt1(p.lowPsig)}</td>
+            <td>${fmt1(p.vsatF)}°F</td>
+            <td>${fmt1(p.sltF)}°F</td>
+            <td>${fmt1(p.idwbF)}°F</td>
+            <td>${fmt1(p.oddbF)}°F</td>
+            <td>${(p.giF>0?'+':'')+fmt1(p.giF)}</td>
+            <td>${p.giPredF===null||p.giPredF===undefined?'—':(p.giPredF>0?'+':'')+fmt1(p.giPredF)}</td>
+            <td>${p.residualF===null||p.residualF===undefined?'—':(p.residualF>0?'+':'')+fmt1(p.residualF)}</td>
+            <td style="color:${statusColor[p.status]||'var(--text)'}">${p.status}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+const MODEL_STATE_LABEL = {'endpoint-regression':'endpoint regression (3+ endpoints)', 'provisional-path-assisted':'provisional (path-assisted)', 'provisional-default-assisted':'provisional (default-assisted)', 'one-endpoint':'one endpoint', 'one-endpoint-default':'one endpoint (default slopes)', 'default-model':'default model (no local data yet)'};
+
+// Diagnostic panel: pools every archived reading (recharge + checkup) at
+// the current site, fits the target/path model, and shows the target
+// summary, the Gi=H(Vn) chart, the accepted/rejected endpoints, and the
+// full point classification — plus, if a session is in progress, a
+// side-by-side comparison against that session's own live TLOW (the same
+// number, since resolveFields() now sources TLOW from this model for
+// every session type).
+function renderHouseModelPanel(){
+  const el = document.getElementById('houseModelPanel');
+  if(sessionInProgress()){ el.style.display='none'; return; }
+  const site = currentSite();
+  if(!site || (site.archive||[]).length===0){ el.style.display='none'; return; }
+  el.style.display = 'block';
+
+  const points = loadHouseModelPoints(site);
+  const result = fitHouseModel(points, site.id);
+  const tag = result.ok
+    ? `${MODEL_STATE_LABEL[result.target.state]||result.target.state} · ${result.target.endpointCount} endpoint${result.target.endpointCount===1?'':'s'}${result.path && result.path.available ? ` · path RMSE ${fmt1(result.path.rmseF)}°F` : ''}`
+    : `no target yet · ${points.length} reading${points.length===1?'':'s'} on record`;
+
+  if(!houseModelOpen){
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">House model</div>
+        <span class="tag">${tag}</span>
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost" id="houseModelToggleBtn">Show model</button>
+      </div>
+    `;
+    document.getElementById('houseModelToggleBtn').onclick = () => { houseModelOpen = true; renderHouseModelPanel(); };
+    return;
+  }
+
+  const pointsTableHtml = buildPointsTableHtml(points);
+  const endpointsTableHtml = buildEndpointsTableHtml(result.endpoints);
+  const hideRow = `<div class="btn-row" style="margin-bottom:0;"><button class="btn ghost" id="houseModelToggleBtn">Hide</button></div>`;
+
+  if(!result.ok){
+    el.innerHTML = `
+      <div class="panel-head">
+        <div class="panel-title">House model</div>
+        <span class="tag">${tag}</span>
+      </div>
+      <div class="chart-empty">${result.reason}</div>
+      <div class="chart-block">
+        <div class="chart-title">Recharge endpoints</div>
+        ${endpointsTableHtml}
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Readings used</div>
+        ${pointsTableHtml}
+      </div>
+      ${hideRow}
+    `;
+    document.getElementById('houseModelToggleBtn').onclick = () => { houseModelOpen = false; renderHouseModelPanel(); };
+    return;
+  }
+
+  const t = result.target, p = result.path;
+  const giVn = buildGiVnChart(result, points);
+  const chart = giVn ? chartWithAxisLabels(giVn.svg, 'Normalized VSAT, Vn (°F)', 'Gi = SH - SHtarget (°F)') : null;
+  const chartLegend = giVn ? buildChartLegendHtml(giVn.legendItems) : '';
+
+  el.innerHTML = `
+    <div class="panel-head">
+      <div class="panel-title">House model</div>
+      <span class="tag">${tag}</span>
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Target model</div>
+      <div class="chart-sub">VSAT_target = R + a·(IDWB−I0) + b·(ODDB−O0), fit from confirmed correct-charge recharge endpoints.</div>
+      <div class="readout-grid">
+        <div class="ro"><div class="k">R (VSAT @ I0,O0)</div><div class="v low">${fmt2(t.RF)}°F</div></div>
+        <div class="ro"><div class="k">a (per °F IDWB)</div><div class="v">${t.aIdwb.toFixed(4)}</div></div>
+        <div class="ro"><div class="k">b (per °F ODDB)</div><div class="v">${t.bOddb.toFixed(4)}</div></div>
+        <div class="ro"><div class="k">I0 / O0 pivot</div><div class="v">${fmt1(t.I0F)}°F / ${fmt1(t.O0F)}°F</div></div>
+      </div>
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Gi = H(Vn), normalized across every archived reading</div>
+      <div class="chart-sub">${p && p.available ? `Path model fit from ${p.pointCount} points (B=${p.B.toFixed(2)}, C=${fmt1(p.CF)}°F, W=${fmt1(p.WF)}°F). Dot color marks which recharge session a point belongs to — matches the same session's rows in "Readings used" below; the vertical line is the common normalized target Vn=R.` : 'Path model unavailable — fewer than 3 usable non-plateau points across the connected recharge sequences.'}</div>
+      ${chart ? chartLegend : ''}
+      ${chart || '<div class="chart-empty">Not enough in-range points to plot.</div>'}
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Recharge endpoints</div>
+      ${endpointsTableHtml}
+    </div>
+    <div class="chart-block">
+      <div class="chart-title">Readings used</div>
+      ${pointsTableHtml}
+    </div>
+    ${hideRow}
+  `;
+  document.getElementById('houseModelToggleBtn').onclick = () => { houseModelOpen = false; renderHouseModelPanel(); };
 }
 
 let resumedFromArchive = null; // {originalIndex, snapshot} — lets Cancel restore the exact original
@@ -2767,7 +3943,8 @@ async function onResumeSession(i){
     steps: session.steps,
     finalWeight: session.finalWeight,
     finalWeightAt: session.finalWeightAt,
-    finalWeightAtStr: session.finalWeightAtStr
+    finalWeightAtStr: session.finalWeightAtStr,
+    switchedFromCheckupId: session.switchedFromCheckupId
   };
   archive.splice(i,1);
   expandedArchiveIdx = null;
@@ -2793,14 +3970,17 @@ async function onCancelResume(){
 function renderAll(){
   renderSitePanel();
   renderSiteEditForm();
+  renderEnvPanel();
   renderBaselinePanel();
-  renderAmbientPanel();
   renderStepPanel();
   renderResultsPanel();
   renderChartsPanel();
   renderHistoryPanel();
+  renderSessionActionsPanel();
   renderArchivePanel();
   renderSiteTrendPanel();
+  renderHouseModelPanel();
+  document.getElementById('backupPanel').style.display = sessionInProgress() ? 'none' : 'block';
   wireBackupButtons();
 }
 
@@ -2892,9 +4072,13 @@ function showJsonFallbackModal(text){
 
 /* ---- Whole-dataset backup/restore (all sites) ---- */
 async function backupAllSites(){
-  const payload = { exportedAt: new Date().toISOString(), sites, currentSiteId };
-  const stamp = new Date().toISOString().slice(0,10);
-  await downloadJson(payload, `backup-${stamp}.json`);
+  const now = Date.now();
+  // The Demo site is synthetic, reproducible anytime via "Add demo" — it
+  // doesn't belong mixed into a personal backup alongside real sites.
+  const exportSites = sites.filter(s => !s.isDemo);
+  const exportCurrentSiteId = exportSites.some(s => s.id===currentSiteId) ? currentSiteId : (exportSites[0] ? exportSites[0].id : null);
+  const payload = { exportedAt: now, exportedAtStr: tsStr(now), sites: exportSites, currentSiteId: exportCurrentSiteId };
+  await downloadJson(payload, `backup-${localDateStamp(now)}.json`);
 }
 
 function restoreAllSites(file){
@@ -2934,10 +4118,10 @@ function restoreAllSites(file){
 async function exportSite(){
   const site = currentSite();
   if(!site) return;
-  const payload = { exportedAt: new Date().toISOString(), site };
-  const stamp = new Date().toISOString().slice(0,10);
+  const now = Date.now();
+  const payload = { exportedAt: now, exportedAtStr: tsStr(now), site };
   const safeName = site.name.replace(/[^a-z0-9]+/gi,'-').toLowerCase().replace(/^-+|-+$/g,'') || 'site';
-  await downloadJson(payload, `${safeName}-${stamp}.json`);
+  await downloadJson(payload, `${safeName}-${localDateStamp(now)}.json`);
 }
 
 function importSiteFile(file){

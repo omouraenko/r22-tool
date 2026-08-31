@@ -1,0 +1,198 @@
+{
+  "exportedAt": "2026-08-30T22:21:46.634Z",
+  "sites": [
+    {
+      "id": "demo-site-001",
+      "name": "Demo",
+      "refrigerant": "R-22",
+      "meteringType": "Fixed-orifice",
+      "nameplateOz": "79",
+      "tons": "3.5",
+      "createdAt": 1718031600000,
+      "active": null,
+      "archive": [
+        {
+          "id": 1718031600000,
+          "type": "recharge",
+          "closedAt": 1718033100000,
+          "closedAtStr": "6/10/2024, 10:25 AM",
+          "baseline": {
+            "startWeight": 34.6,
+            "baseWeight": 34.15,
+            "lowPsig": 60,
+            "highPsig": 245,
+            "suctionTemp": 68,
+            "outdoorDB": "91",
+            "indoorWB": "68",
+            "liquidTemp": "99",
+            "notes": "Found badly low on charge",
+            "timestamp": 1718031780000,
+            "timestampStr": "6/10/2024, 10:03 AM",
+            "indoorDB": "",
+            "indoorRH": ""
+          },
+          "steps": [
+            {
+              "lowPsig": 63.1,
+              "highPsig": "",
+              "suctionTemp": 60.4,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1718032140000,
+              "timestampStr": "6/10/2024, 10:09 AM",
+              "stepWeight": 34.05
+            },
+            {
+              "lowPsig": 64,
+              "highPsig": "",
+              "suctionTemp": 56.9,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1718032500000,
+              "timestampStr": "6/10/2024, 10:15 AM",
+              "stepWeight": 34.02
+            },
+            {
+              "lowPsig": 65,
+              "highPsig": "",
+              "suctionTemp": 55,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1718032860000,
+              "timestampStr": "6/10/2024, 10:21 AM",
+              "stepWeight": 34
+            }
+          ],
+          "finalWeight": 34,
+          "finalWeightAt": 1718033100000,
+          "finalWeightAtStr": "6/10/2024, 10:25 AM",
+          "summary": {
+            "totalOz": 9.600000000000023,
+            "finalError": 0.9647887323943678,
+            "stepCount": 3
+          }
+        },
+        {
+          "id": 1747319460000,
+          "type": "checkup",
+          "closedAt": 1747319460000,
+          "closedAtStr": "5/15/2025, 9:31 AM",
+          "baseline": {
+            "lowPsig": 60.8,
+            "highPsig": 245,
+            "suctionTemp": 67,
+            "outdoorDB": "86",
+            "indoorWB": "68",
+            "indoorDB": "76",
+            "indoorRH": "52",
+            "liquidTemp": "",
+            "notes": "",
+            "timestamp": 1747319460000,
+            "timestampStr": "5/15/2025, 9:31 AM"
+          },
+          "steps": [],
+          "summary": {
+            "totalOz": 0,
+            "finalError": 13.51,
+            "stepCount": 0
+          }
+        },
+        {
+          "id": 1752850800000,
+          "type": "recharge",
+          "closedAt": 1752852120000,
+          "closedAtStr": "7/18/2025, 10:22 AM",
+          "baseline": {
+            "startWeight": 33.5,
+            "lowPsig": 61,
+            "highPsig": 295,
+            "suctionTemp": 65,
+            "outdoorDB": "98",
+            "indoorWB": "66",
+            "indoorDB": "76",
+            "indoorRH": "57",
+            "liquidTemp": "",
+            "notes": "A year later, a hot day found it low again",
+            "timestamp": 1752850800000,
+            "timestampStr": "7/18/2025, 10:00 AM"
+          },
+          "steps": [
+            {
+              "lowPsig": 63,
+              "highPsig": "",
+              "suctionTemp": 65,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1752851040000,
+              "timestampStr": "7/18/2025, 10:04 AM"
+            },
+            {
+              "lowPsig": 64,
+              "highPsig": "",
+              "suctionTemp": 63,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1752851460000,
+              "timestampStr": "7/18/2025, 10:11 AM"
+            },
+            {
+              "lowPsig": 65.5,
+              "highPsig": "",
+              "suctionTemp": 55,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1752851760000,
+              "timestampStr": "7/18/2025, 10:16 AM"
+            },
+            {
+              "lowPsig": 67.5,
+              "highPsig": "",
+              "suctionTemp": 49,
+              "outdoorDB": "",
+              "indoorWB": "",
+              "indoorDB": "",
+              "indoorRH": "",
+              "liquidTemp": "",
+              "notes": "",
+              "timestamp": 1752852000000,
+              "timestampStr": "7/18/2025, 10:20 AM"
+            }
+          ],
+          "finalWeight": 33.1,
+          "finalWeightAt": 1752852120000,
+          "finalWeightAtStr": "7/18/2025, 10:22 AM",
+          "summary": {
+            "totalOz": 6.399999999999977,
+            "finalError": -0.29577464788732755,
+            "stepCount": 4
+          }
+        }
+      ]
+    }
+  ],
+  "currentSiteId": "demo-site-001"
+}
