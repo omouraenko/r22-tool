@@ -17,7 +17,9 @@ Alternatively, you can download the standalone `index.html` file from this repos
 - Tells you to add refrigerant, stop, or flags a problem worth investigating
 - Tracks refrigerant added per session (via jug weight) and estimates how much more is needed
 - Keeps history per site (system), and uses that history to improve its estimates over time
+- Learns a house-specific model of target charge and leak-down behavior from a site's own history, once there's enough of it — see [How the house model works](model/R22_charging_model_algorithm.md) for the algorithm
 - Charts session and multi-visit trends, including a rough "next recharge due" forecast based on estimated leak rate
+- Includes a built-in **Demo** site with realistic sample history, so you can try the tool (and see the house model in action) without entering real data first
 - Everything is editable after the fact — you can correct or delete any past reading if you find an error
 - Works offline once loaded; all data stays on your device (see below)
 
