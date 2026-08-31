@@ -254,6 +254,15 @@
     .field-grid{grid-template-columns:repeat(auto-fit,minmax(130px,1fr));}
   }
 
+  /* An iPhone in landscape is short (~375-430px tall) but still wide, so
+     the max-width:520px rules above don't kick in there — the .subhead
+     instructional lines were sized for the portrait case and end up
+     looking oversized relative to how little vertical room landscape
+     actually has. */
+  @media (max-height:500px) and (orientation:landscape){
+    .subhead{font-size:12px;}
+  }
+
   /* ---- Custom modal (replaces native confirm/alert — blocked in sandboxed iframes) ---- */
   .modal-overlay{
     position:fixed; inset:0; background:rgba(10,12,13,0.72);
